@@ -1,6 +1,13 @@
 fastapi
 uvicorn
+pydantic
 supabase
 python-dotenv
 requests
-pydantic
+msal
+cryptography
+pyOpenSSL
+python-multipart
+pypdf
+reportlab
+num2words
