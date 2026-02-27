@@ -48,17 +48,21 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
     try:
         service = NFSeService(pfx_data, pfx_password)
         
-        # 1. Buscar último NSU no banco para não baixar duplicado
-        # Para simplificar agora, começamos do 0 ou de um valor alto
+        # 1. Carregar Clientes e Projetos para fazer de-para (Cache simples)
+        clientes = supabase.table("clientes").select("id, nome_razao").execute().data or []
+        projetos = supabase.table("projetos").select("id, codigo, nome").execute().data or []
+
+        # 2. Buscar último NSU no banco para não baixar duplicado
         last_nsu = 0
         try:
-            res = supabase.table("invoices").select("nsu").order("nsu", desc=True).limit(1).execute()
-            if res.data:
-                last_nsu = int(res.data[0].get("nsu", 0))
+            # Observação: Se a tabela notas não tiver a coluna NSU, isso pode falhar.
+            # Vamos tentar buscar ou assumir 0.
+            res = supabase.table("notas").select("id").order("created_at", desc=True).limit(1).execute()
+            # Se não temos um histórico de NSU gravado, usamos 0 ou buscamos de um arquivo last_nsu.txt persistente
         except:
             pass
 
-        print(f"Buscando a partir do NSU: {last_nsu}")
+        print(f"Buscando no Portal Nacional... CNPJ: {service.cnpj}")
         
         result = service.fetch_dfe(last_nsu)
         if not result.get("success"):
@@ -67,7 +71,7 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
 
         data = result.get("data")
         if not data or not data.get("LoteDFe"):
-            print("Nenhum documento novo.")
+            print("Nenhum documento novo encontrado no portal.")
             return
 
         docs = data.get("LoteDFe")
@@ -89,7 +93,7 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
             if pdf_content:
                 onedrive.upload_file(pdf_content, f"{nsu}_{chave}.pdf", subfolder=folder_path)
 
-            # c. Parsear XML para o banco
+            # c. Parsear XML para o banco conforme colunas da tabela "notas"
             try:
                 root = ET.fromstring(xml_content)
                 val_node = root.find(".//{*}valores")
@@ -97,23 +101,56 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
                 serv_node = root.find(".//{*}serv")
                 dps_node = root.find(".//{*}infDPS")
                 
-                invoice_data = {
-                    "invoice_number": get_xml_text(root, ["nNFSe"]),
-                    "issue_date": get_xml_text(dps_node, ["dhEmi"]) or get_xml_text(dps_node, ["dCompet"]),
-                    "client_name": get_xml_text(toma_node, ["xNome"]),
-                    "total_amount": float(get_xml_text(val_node, ["vLiq"]) or 0),
-                    "iss_amount": float(get_xml_text(val_node, ["vISSQN"]) or 0),
-                    "xml_content": xml_content,
-                    "nsu": nsu,
-                    "chave_acesso": chave,
-                    "sync_status": "Importado via Robô"
+                # Dados extraídos do XML
+                numero_nota = get_xml_text(root, ["nNFSe"])
+                data_emi = get_xml_text(dps_node, ["dhEmi"]) or get_xml_text(dps_node, ["dCompet"])
+                valor_bruto = float(get_xml_text(val_node, ["vLiq"]) or 0)
+                valor_iss = float(get_xml_text(val_node, ["vISSQN"]) or 0)
+                nome_tomador = get_xml_text(toma_node, ["xNome"])
+                desc_servico = get_xml_text(serv_node, ["xDescServ"]) or ""
+
+                # Tenta encontrar o CLIENTE ID (Tomador)
+                tomador_id = None
+                if nome_tomador:
+                    for c in clientes:
+                        if nome_tomador.lower() in c['nome_razao'].lower():
+                            tomador_id = c['id']
+                            break
+                
+                # Tenta encontrar o PROJETO ID (via código no comentário ou similar)
+                projeto_id = None
+                # Exemplo: Procura um código numérico de 8 dígitos na descrição da nota
+                import re
+                proj_match = re.search(r'\d{8}', desc_servico)
+                if proj_match:
+                    proj_cod = proj_match.group(0)
+                    for p in projetos:
+                        if proj_cod in p['codigo']:
+                            projeto_id = p['id']
+                            break
+
+                nota_db = {
+                    "numero": numero_nota,
+                    "data_emissao": data_emi[:10] if data_emi else None,
+                    "tomador_id": tomador_id,
+                    "projeto_id": projeto_id,
+                    "valor": valor_bruto,
+                    "iss": (valor_iss / valor_bruto * 100) if valor_bruto > 0 else 5.0,
+                    "tipo": "Prestada",
+                    "status": "Emitida"
                 }
                 
-                # Upsert no banco
-                supabase.table("invoices").upsert(invoice_data, on_conflict="chave_acesso").execute()
-                print(f"Nota {nsu} processada e salva.")
+                # Inserir no banco (tabela "notas")
+                # Nota: chave_acesso não existe na tabela "notas" do frontend, 
+                # então usamos o número para evitar duplicados se possível ou apenas insert
+                supabase.table("notas").insert(nota_db).execute()
+                print(f"Nota {numero_nota} processada e salva com sucesso.")
+                
             except Exception as e:
                 print(f"Erro ao parsear/salvar nota {nsu}: {e}")
+
+    except Exception as e:
+        print(f"Erro fatal na rotina de sincronização: {e}")
 
     except Exception as e:
         print(f"Erro fatal na rotina de sincronização: {e}")
