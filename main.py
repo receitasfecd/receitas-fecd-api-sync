@@ -1,5 +1,6 @@
 import os
 from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -8,6 +9,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 app = FastAPI(title="FECD Sync API", version="1.0.0")
+
+# CONFIGURAÇÃO DE CORS - LIBERA O FRONTEND PARA CHAMAR O ROBÔ
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # Libera para qualquer origem em desenvolvimento, podemos restringir depois
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
