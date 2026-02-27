@@ -117,41 +117,70 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
                 cnpj_tomador_xml = get_xml_text(toma_node, ["CNPJ"]) or get_xml_text(toma_node, ["CPF"])
                 desc_servico = get_xml_text(serv_node, ["xDescServ"]) or ""
 
-                # Encontrar Cliente no Banco (Prioridade 1: CNPJ/CPF, Prioridade 2: Nome)
+                # 1. Encontrar ou CADASTRAR Cliente no Banco
                 tomador_id = None
-                if cnpj_tomador_xml:
-                    clean_cnpj = ''.join(filter(str.isdigit, cnpj_tomador_xml))
-                    for c in clientes:
-                        if clean_cnpj in str(c.get('documento', '')) or clean_cnpj in str(c.get('cnpj', '')):
-                            tomador_id = c['id']
-                            break
+                clean_cnpj_xml = ''.join(filter(str.isdigit, cnpj_tomador_xml)) if cnpj_tomador_xml else None
                 
+                # Busca na lista em memória (cache)
+                for c in clientes:
+                    doc_banco = ''.join(filter(str.isdigit, str(c.get('documento', '')) or str(c.get('cnpj', ''))))
+                    if clean_cnpj_xml and clean_cnpj_xml == doc_banco:
+                        tomador_id = c['id']
+                        break
+                    if not tomador_id and nome_tomador_xml and nome_tomador_xml.lower() == str(c.get('nome_razao', '')).lower():
+                        tomador_id = c['id']
+                        break
+                
+                # Se não encontrou, CADASTRA AUTOMATICAMENTE
                 if not tomador_id and nome_tomador_xml:
-                    for c in clientes:
-                        if nome_tomador_xml.lower() in str(c.get('nome_razao', '')).lower():
-                            tomador_id = c['id']
-                            break
-                
-                if not tomador_id:
-                    print(f"Aviso: Tomador '{nome_tomador_xml}' não encontrado no cadastro. Pulando inserção da nota {numero_nota} para evitar erro.")
-                    continue
+                    print(f"Robô: Cadastrando novo cliente: {nome_tomador_xml}")
+                    try:
+                        new_cli = {
+                            "nome_razao": nome_tomador_xml,
+                            "documento": cnpj_tomador_xml,
+                            "status": "Ativo",
+                            "tipo": "Cliente"
+                        }
+                        cli_res = supabase.table("clientes").insert(new_cli).execute()
+                        if cli_res.data:
+                            tomador_id = cli_res.data[0]['id']
+                            clientes.append(cli_res.data[0]) # Atualiza cache para próxima nota
+                    except Exception as e:
+                        print(f"Erro ao cadastrar cliente automático: {e}")
 
-                # Vínculo de Projeto
+                # 2. Encontrar ou CADASTRAR Projeto
                 projeto_id = None
-                # Busca código de 8 dígitos na descrição (Padrão FECD)
                 import re
                 proj_match = re.search(r'\d{8}', desc_servico)
-                if proj_match:
-                    proj_cod = proj_match.group(0)
-                    for p in projetos:
-                        if proj_cod in str(p.get('codigo', '')):
-                            projeto_id = p['id']
-                            break
+                proj_cod_xml = proj_match.group(0) if proj_match else None
                 
+                for p in projetos:
+                    if proj_cod_xml and proj_cod_xml in str(p.get('codigo', '')):
+                        projeto_id = p['id']
+                        break
+                
+                # Se não achou, usa o primeiro projeto ou cria um padrão
                 if not projeto_id:
-                    # Tenta pegar o primeiro projeto ativo se for obrigatório ou associar a um projeto "Geral"
                     if projetos:
                         projeto_id = projetos[0]['id']
+                    else:
+                        print("Robô: Criando projeto padrão 'Sincronização Automática'")
+                        try:
+                            new_proj = {
+                                "nome": f"Sincronização Automática {mes}",
+                                "codigo": "AUTO" + mes.replace("/", ""),
+                                "status": "Ativo"
+                            }
+                            proj_res = supabase.table("projetos").insert(new_proj).execute()
+                            if proj_res.data:
+                                projeto_id = proj_res.data[0]['id']
+                                projetos.append(proj_res.data[0])
+                        except Exception as e:
+                            print(f"Erro ao criar projeto automático: {e}")
+
+                if not tomador_id or not projeto_id:
+                    print(f"Aviso: Não foi possível vincular a nota {numero_nota} a um cliente/projeto. Pulando.")
+                    continue
 
                 nota_db = {
                     "numero": numero_nota,
