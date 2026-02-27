@@ -43,45 +43,42 @@ def get_xml_text(elem, tags):
     return None
 
 def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
-    print(f"Iniciando sincronização real para o mês {mes}...")
+    print(f"Iniciando sincronização real (v3.0) para {mes}...")
     
     try:
         service = NFSeService(pfx_data, pfx_password)
         
-        # 1. Carregar Clientes e Projetos para fazer de-para
+        # 1. Carregar Clientes e Projetos para de-para inteligente
         clientes = []
         try:
-            clis_res = supabase.table("clientes").select("id, nome_razao").execute()
+            clis_res = supabase.table("clientes").select("*").execute()
             clientes = clis_res.data or []
         except Exception as e:
             print(f"Erro ao carregar clientes: {e}")
 
         projetos = []
         try:
-            projs_res = supabase.table("projetos").select("id, codigo, nome").execute()
+            projs_res = supabase.table("projetos").select("*").execute()
             projetos = projs_res.data or []
         except Exception as e:
             print(f"Erro ao carregar projetos: {e}")
 
-        # 2. Buscar último NSU (Para esta versão, iniciamos em 0 ou usamos o maior id se nsu não existir)
+        # 2. Consultar Portal Nacional
         last_nsu = 0
-        
-        print(f"Buscando no Portal Nacional... CNPJ: {service.cnpj} (NSU > {last_nsu})")
+        print(f"Buscando notas no Portal Nacional (CNPJ: {service.cnpj}, NSU > {last_nsu})")
         
         result = service.fetch_dfe(last_nsu)
         if not result.get("success"):
-            error_msg = result.get('error', 'Erro desconhecido')
-            details = result.get('details', '')
-            print(f"Portal retornou erro: {error_msg} - {details}")
+            print(f"Erro no Portal: {result.get('details', result.get('error'))}")
             return
 
         data = result.get("data")
         if not data or not data.get("LoteDFe"):
-            print("Portal: Nenhum documento novo disponível para seu CNPJ.")
+            print("Resultado: Nenhuma nota nova disponível no Portal Nacional para este CNPJ.")
             return
 
         docs = data.get("LoteDFe")
-        print(f"Sincronizador: Localizados {len(docs)} documentos.")
+        print(f"Sucesso: {len(docs)} documentos encontrados.")
 
         importados_sucesso = 0
         for doc in docs:
@@ -89,19 +86,19 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
             chave = doc.get("ChaveAcesso")
             xml_content = doc.get("xml_decoded")
 
-            if not xml_content: 
-                print(f"NSU {nsu}: XML vazio ou não decodificado.")
-                continue
+            if not xml_content: continue
 
-            # a. Salvar no OneDrive (XML/PDF)
-            folder_path = f"{mes.replace('/', '-')}"
-            onedrive.upload_file(xml_content.encode('utf-8'), f"{nsu}_{chave}.xml", subfolder=folder_path)
-            
-            pdf_content = service.download_pdf(chave)
-            if pdf_content:
-                onedrive.upload_file(pdf_content, f"{nsu}_{chave}.pdf", subfolder=folder_path)
+            # a. OneDrive (Sempre salva para garantir backup)
+            folder_path = f"Sincronizacao-{mes.replace('/', '-')}"
+            try:
+                onedrive.upload_file(xml_content.encode('utf-8'), f"{nsu}_{chave}.xml", subfolder=folder_path)
+                pdf_content = service.download_pdf(chave)
+                if pdf_content:
+                    onedrive.upload_file(pdf_content, f"{nsu}_{chave}.pdf", subfolder=folder_path)
+            except:
+                print(f"Aviso: Erro ao enviar arquivos da nota {nsu} para o OneDrive.")
 
-            # b. Parsear e Salvar no Banco
+            # b. Persistência no Banco de Dados
             try:
                 root = ET.fromstring(xml_content)
                 val_node = root.find(".//{*}valores")
@@ -109,31 +106,52 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
                 serv_node = root.find(".//{*}serv")
                 dps_node = root.find(".//{*}infDPS")
                 
+                # Campos básicos
                 numero_nota = get_xml_text(root, ["nNFSe"])
                 data_emi = get_xml_text(dps_node, ["dhEmi"]) or get_xml_text(dps_node, ["dCompet"])
                 valor_bruto = float(get_xml_text(val_node, ["vLiq"]) or 0)
                 valor_iss = float(get_xml_text(val_node, ["vISSQN"]) or 0)
-                nome_tomador = get_xml_text(toma_node, ["xNome"])
+                
+                # Dados do Tomador no XML
+                nome_tomador_xml = get_xml_text(toma_node, ["xNome"])
+                cnpj_tomador_xml = get_xml_text(toma_node, ["CNPJ"]) or get_xml_text(toma_node, ["CPF"])
                 desc_servico = get_xml_text(serv_node, ["xDescServ"]) or ""
 
-                # Vínculo de Cliente
+                # Encontrar Cliente no Banco (Prioridade 1: CNPJ/CPF, Prioridade 2: Nome)
                 tomador_id = None
-                if nome_tomador:
+                if cnpj_tomador_xml:
+                    clean_cnpj = ''.join(filter(str.isdigit, cnpj_tomador_xml))
                     for c in clientes:
-                        if nome_tomador.lower() in c['nome_razao'].lower():
+                        if clean_cnpj in str(c.get('documento', '')) or clean_cnpj in str(c.get('cnpj', '')):
                             tomador_id = c['id']
                             break
                 
+                if not tomador_id and nome_tomador_xml:
+                    for c in clientes:
+                        if nome_tomador_xml.lower() in str(c.get('nome_razao', '')).lower():
+                            tomador_id = c['id']
+                            break
+                
+                if not tomador_id:
+                    print(f"Aviso: Tomador '{nome_tomador_xml}' não encontrado no cadastro. Pulando inserção da nota {numero_nota} para evitar erro.")
+                    continue
+
                 # Vínculo de Projeto
                 projeto_id = None
+                # Busca código de 8 dígitos na descrição (Padrão FECD)
                 import re
                 proj_match = re.search(r'\d{8}', desc_servico)
                 if proj_match:
                     proj_cod = proj_match.group(0)
                     for p in projetos:
-                        if proj_cod in p['codigo']:
+                        if proj_cod in str(p.get('codigo', '')):
                             projeto_id = p['id']
                             break
+                
+                if not projeto_id:
+                    # Tenta pegar o primeiro projeto ativo se for obrigatório ou associar a um projeto "Geral"
+                    if projetos:
+                        projeto_id = projetos[0]['id']
 
                 nota_db = {
                     "numero": numero_nota,
@@ -146,31 +164,27 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
                     "status": "Emitida"
                 }
                 
-                # Inserção com tratamento de erro
                 try:
-                    insert_res = supabase.table("notas").insert(nota_db).execute()
+                    supabase.table("notas").insert(nota_db).execute()
                     importados_sucesso += 1
-                    print(f"Nota {numero_nota} importada com sucesso!")
+                    print(f"Nota {numero_nota} vinculada ao cliente {tomador_id} e salva!")
                 except Exception as db_err:
                     if "409" in str(db_err) or "duplicate" in str(db_err).lower():
-                        print(f"Nota {numero_nota} já existe no banco. Pulando.")
+                        pass # Já existe
                     else:
-                        print(f"Erro DB na nota {numero_nota}: {db_err}")
+                        print(f"Erro ao salvar nota {numero_nota}: {db_err}")
                 
             except Exception as parse_err:
-                print(f"Erro ao parsear NSU {nsu}: {parse_err}")
+                print(f"Erro no parseamento da nota: {parse_err}")
 
-        print(f"Sincronização Finalizada: {importados_sucesso} notas importadas para o banco.")
+        print(f"Sincronização Finalizada. Total salvo: {importados_sucesso} notas.")
 
     except Exception as fatal_err:
-        print(f"ERRO CRÍTICO NA SINCRONIZAÇÃO: {fatal_err}")
-
-    except Exception as e:
-        print(f"Erro fatal na rotina de sincronização: {e}")
+        print(f"ERRO CRÍTICO: {fatal_err}")
 
 @app.get("/")
 def health_check():
-    return {"status": "ok", "message": "FECD Sync API 2.0 Online. Pronto para chamadas mTLS."}
+    return {"status": "ok", "message": "FECD Sync API v3.0 Online."}
 
 @app.post("/sincronizar")
 async def disparar_sincronizacao(
@@ -180,24 +194,21 @@ async def disparar_sincronizacao(
     senha_pfx: str = Form(...),
     certificado: UploadFile = File(...)
 ):
-    if token != os.getenv("SYNC_SECRET_TOKEN", "fecd_secreto_123"):
+    # Unificado com o site
+    ALLOWED_TOKEN = os.getenv("SYNC_SECRET_TOKEN", "senha_super_secreta_fecd_render")
+    if token != ALLOWED_TOKEN:
         raise HTTPException(status_code=403, detail="Token de segurança inválido.")
     
-    # Lê arquivo certificado
     pf_data = await certificado.read()
-    
-    # Valida certificado (tenta iniciar o service)
     try:
         test_service = NFSeService(pf_data, senha_pfx)
         if not test_service.cnpj:
-             raise Exception("PFX ou senha inválidos.")
+             raise Exception("PFX não identificado.")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Erro no certificado: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Certificado Inválido: {str(e)}")
 
-    # Inicia rotina em background
     background_tasks.add_task(process_sync, mes_referencia, pf_data, senha_pfx)
     
     return {
         "status": "sucesso", 
-        "mensagem": f"Robô iniciado! Buscando notas de {mes_referencia} no Portal Nacional. Os arquivos serão salvos no seu OneDrive em instantes."
-    }
+        "mensagem": f"Robô v3.0 iniciado! O processo levará alguns instantes. Confira a aba Notas Emitidas em breve."    }
