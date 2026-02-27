@@ -48,52 +48,60 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
     try:
         service = NFSeService(pfx_data, pfx_password)
         
-        # 1. Carregar Clientes e Projetos para fazer de-para (Cache simples)
-        clientes = supabase.table("clientes").select("id, nome_razao").execute().data or []
-        projetos = supabase.table("projetos").select("id, codigo, nome").execute().data or []
-
-        # 2. Buscar último NSU no banco para não baixar duplicado
-        last_nsu = 0
+        # 1. Carregar Clientes e Projetos para fazer de-para
+        clientes = []
         try:
-            # Observação: Se a tabela notas não tiver a coluna NSU, isso pode falhar.
-            # Vamos tentar buscar ou assumir 0.
-            res = supabase.table("notas").select("id").order("created_at", desc=True).limit(1).execute()
-            # Se não temos um histórico de NSU gravado, usamos 0 ou buscamos de um arquivo last_nsu.txt persistente
-        except:
-            pass
+            clis_res = supabase.table("clientes").select("id, nome_razao").execute()
+            clientes = clis_res.data or []
+        except Exception as e:
+            print(f"Erro ao carregar clientes: {e}")
 
-        print(f"Buscando no Portal Nacional... CNPJ: {service.cnpj}")
+        projetos = []
+        try:
+            projs_res = supabase.table("projetos").select("id, codigo, nome").execute()
+            projetos = projs_res.data or []
+        except Exception as e:
+            print(f"Erro ao carregar projetos: {e}")
+
+        # 2. Buscar último NSU (Para esta versão, iniciamos em 0 ou usamos o maior id se nsu não existir)
+        last_nsu = 0
+        
+        print(f"Buscando no Portal Nacional... CNPJ: {service.cnpj} (NSU > {last_nsu})")
         
         result = service.fetch_dfe(last_nsu)
         if not result.get("success"):
-            print(f"Erro ao buscar DFe: {result.get('error')}")
+            error_msg = result.get('error', 'Erro desconhecido')
+            details = result.get('details', '')
+            print(f"Portal retornou erro: {error_msg} - {details}")
             return
 
         data = result.get("data")
         if not data or not data.get("LoteDFe"):
-            print("Nenhum documento novo encontrado no portal.")
+            print("Portal: Nenhum documento novo disponível para seu CNPJ.")
             return
 
         docs = data.get("LoteDFe")
-        print(f"Recebidos {len(docs)} documentos.")
+        print(f"Sincronizador: Localizados {len(docs)} documentos.")
 
+        importados_sucesso = 0
         for doc in docs:
             nsu = doc.get("NSU")
             chave = doc.get("ChaveAcesso")
             xml_content = doc.get("xml_decoded")
 
-            if not xml_content: continue
+            if not xml_content: 
+                print(f"NSU {nsu}: XML vazio ou não decodificado.")
+                continue
 
-            # a. Salvar no OneDrive (XML)
+            # a. Salvar no OneDrive (XML/PDF)
             folder_path = f"{mes.replace('/', '-')}"
             onedrive.upload_file(xml_content.encode('utf-8'), f"{nsu}_{chave}.xml", subfolder=folder_path)
-
-            # b. Baixar PDF e salvar no OneDrive
+            
             pdf_content = service.download_pdf(chave)
             if pdf_content:
                 onedrive.upload_file(pdf_content, f"{nsu}_{chave}.pdf", subfolder=folder_path)
 
-            # c. Parsear XML para o banco conforme colunas da tabela "notas"
+            # b. Parsear e Salvar no Banco
             try:
                 root = ET.fromstring(xml_content)
                 val_node = root.find(".//{*}valores")
@@ -101,7 +109,6 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
                 serv_node = root.find(".//{*}serv")
                 dps_node = root.find(".//{*}infDPS")
                 
-                # Dados extraídos do XML
                 numero_nota = get_xml_text(root, ["nNFSe"])
                 data_emi = get_xml_text(dps_node, ["dhEmi"]) or get_xml_text(dps_node, ["dCompet"])
                 valor_bruto = float(get_xml_text(val_node, ["vLiq"]) or 0)
@@ -109,7 +116,7 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
                 nome_tomador = get_xml_text(toma_node, ["xNome"])
                 desc_servico = get_xml_text(serv_node, ["xDescServ"]) or ""
 
-                # Tenta encontrar o CLIENTE ID (Tomador)
+                # Vínculo de Cliente
                 tomador_id = None
                 if nome_tomador:
                     for c in clientes:
@@ -117,9 +124,8 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
                             tomador_id = c['id']
                             break
                 
-                # Tenta encontrar o PROJETO ID (via código no comentário ou similar)
+                # Vínculo de Projeto
                 projeto_id = None
-                # Exemplo: Procura um código numérico de 8 dígitos na descrição da nota
                 import re
                 proj_match = re.search(r'\d{8}', desc_servico)
                 if proj_match:
@@ -135,22 +141,29 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
                     "tomador_id": tomador_id,
                     "projeto_id": projeto_id,
                     "valor": valor_bruto,
-                    "iss": (valor_iss / valor_bruto * 100) if valor_bruto > 0 else 5.0,
+                    "iss": (valor_iss / valor_bruto * 100) if valor_bruto > 0 and valor_iss > 0 else 5.0,
                     "tipo": "Prestada",
                     "status": "Emitida"
                 }
                 
-                # Inserir no banco (tabela "notas")
-                # Nota: chave_acesso não existe na tabela "notas" do frontend, 
-                # então usamos o número para evitar duplicados se possível ou apenas insert
-                supabase.table("notas").insert(nota_db).execute()
-                print(f"Nota {numero_nota} processada e salva com sucesso.")
+                # Inserção com tratamento de erro
+                try:
+                    insert_res = supabase.table("notas").insert(nota_db).execute()
+                    importados_sucesso += 1
+                    print(f"Nota {numero_nota} importada com sucesso!")
+                except Exception as db_err:
+                    if "409" in str(db_err) or "duplicate" in str(db_err).lower():
+                        print(f"Nota {numero_nota} já existe no banco. Pulando.")
+                    else:
+                        print(f"Erro DB na nota {numero_nota}: {db_err}")
                 
-            except Exception as e:
-                print(f"Erro ao parsear/salvar nota {nsu}: {e}")
+            except Exception as parse_err:
+                print(f"Erro ao parsear NSU {nsu}: {parse_err}")
 
-    except Exception as e:
-        print(f"Erro fatal na rotina de sincronização: {e}")
+        print(f"Sincronização Finalizada: {importados_sucesso} notas importadas para o banco.")
+
+    except Exception as fatal_err:
+        print(f"ERRO CRÍTICO NA SINCRONIZAÇÃO: {fatal_err}")
 
     except Exception as e:
         print(f"Erro fatal na rotina de sincronização: {e}")
