@@ -63,150 +63,112 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str):
         except Exception as e:
             print(f"Erro ao carregar projetos: {e}")
 
-        # 2. Consultar Portal Nacional
+        # 2. Consultar Portal Nacional em LOOP (Busca exaustiva)
         last_nsu = 0
-        print(f"Buscando notas no Portal Nacional (CNPJ: {service.cnpj}, NSU > {last_nsu})")
-        
-        result = service.fetch_dfe(last_nsu)
-        if not result.get("success"):
-            print(f"Erro no Portal: {result.get('details', result.get('error'))}")
-            return
-
-        data = result.get("data")
-        if not data or not data.get("LoteDFe"):
-            print("Resultado: Nenhuma nota nova disponível no Portal Nacional para este CNPJ.")
-            return
-
-        docs = data.get("LoteDFe")
-        print(f"Sucesso: {len(docs)} documentos encontrados.")
-
+        total_notas_detectadas = 0
         importados_sucesso = 0
-        for doc in docs:
-            nsu = doc.get("NSU")
-            chave = doc.get("ChaveAcesso")
-            xml_content = doc.get("xml_decoded")
+        
+        # Filtro de data: Extrai Ano/Mês
+        # mes vem como "02/2026"
+        ref_mes, ref_ano = mes.split("/")
 
-            if not xml_content: continue
+        continuar_busca = True
+        while continuar_busca:
+            print(f"Buscando Lote: NSU > {last_nsu}")
+            result = service.fetch_dfe(last_nsu)
+            
+            if not result.get("success"):
+                print(f"Erro no Portal: {result.get('error')}")
+                break
 
-            # a. OneDrive (Sempre salva para garantir backup)
-            folder_path = f"Sincronizacao-{mes.replace('/', '-')}"
-            try:
-                onedrive.upload_file(xml_content.encode('utf-8'), f"{nsu}_{chave}.xml", subfolder=folder_path)
-                pdf_content = service.download_pdf(chave)
-                if pdf_content:
-                    onedrive.upload_file(pdf_content, f"{nsu}_{chave}.pdf", subfolder=folder_path)
-            except:
-                print(f"Aviso: Erro ao enviar arquivos da nota {nsu} para o OneDrive.")
+            data = result.get("data")
+            if not data or not data.get("LoteDFe"):
+                print("Chegou ao fim das notas no portal.")
+                break
 
-            # b. Persistência no Banco de Dados
-            try:
-                root = ET.fromstring(xml_content)
-                val_node = root.find(".//{*}valores")
-                toma_node = root.find(".//{*}toma")
-                serv_node = root.find(".//{*}serv")
-                dps_node = root.find(".//{*}infDPS")
-                
-                # Campos básicos
-                numero_nota = get_xml_text(root, ["nNFSe"])
-                data_emi = get_xml_text(dps_node, ["dhEmi"]) or get_xml_text(dps_node, ["dCompet"])
-                valor_bruto = float(get_xml_text(val_node, ["vLiq"]) or 0)
-                valor_iss = float(get_xml_text(val_node, ["vISSQN"]) or 0)
-                
-                # Dados do Tomador no XML
-                nome_tomador_xml = get_xml_text(toma_node, ["xNome"])
-                cnpj_tomador_xml = get_xml_text(toma_node, ["CNPJ"]) or get_xml_text(toma_node, ["CPF"])
-                desc_servico = get_xml_text(serv_node, ["xDescServ"]) or ""
+            docs = data.get("LoteDFe")
+            print(f"Lote recebido: {len(docs)} documentos.")
+            
+            for doc in docs:
+                nsu = int(doc.get("NSU", 0))
+                last_nsu = max(last_nsu, nsu)
+                chave = doc.get("ChaveAcesso")
+                xml_content = doc.get("xml_decoded")
 
-                # 1. Encontrar ou CADASTRAR Cliente no Banco
-                tomador_id = None
-                clean_cnpj_xml = ''.join(filter(str.isdigit, cnpj_tomador_xml)) if cnpj_tomador_xml else None
-                
-                # Busca na lista em memória (cache)
-                for c in clientes:
-                    doc_banco = ''.join(filter(str.isdigit, str(c.get('documento', '')) or str(c.get('cnpj', ''))))
-                    if clean_cnpj_xml and clean_cnpj_xml == doc_banco:
-                        tomador_id = c['id']
-                        break
-                    if not tomador_id and nome_tomador_xml and nome_tomador_xml.lower() == str(c.get('nome_razao', '')).lower():
-                        tomador_id = c['id']
-                        break
-                
-                # Se não encontrou, CADASTRA AUTOMATICAMENTE
-                if not tomador_id and nome_tomador_xml:
-                    print(f"Robô: Cadastrando novo cliente: {nome_tomador_xml}")
-                    try:
-                        new_cli = {
-                            "nome_razao": nome_tomador_xml,
-                            "documento": cnpj_tomador_xml,
-                            "status": "Ativo",
-                            "tipo": "Cliente"
-                        }
-                        cli_res = supabase.table("clientes").insert(new_cli).execute()
-                        if cli_res.data:
-                            tomador_id = cli_res.data[0]['id']
-                            clientes.append(cli_res.data[0]) # Atualiza cache para próxima nota
-                    except Exception as e:
-                        print(f"Erro ao cadastrar cliente automático: {e}")
+                if not xml_content: continue
 
-                # 2. Encontrar ou CADASTRAR Projeto
-                projeto_id = None
-                import re
-                proj_match = re.search(r'\d{8}', desc_servico)
-                proj_cod_xml = proj_match.group(0) if proj_match else None
-                
-                for p in projetos:
-                    if proj_cod_xml and proj_cod_xml in str(p.get('codigo', '')):
-                        projeto_id = p['id']
-                        break
-                
-                # Se não achou, usa o primeiro projeto ou cria um padrão
-                if not projeto_id:
-                    if projetos:
-                        projeto_id = projetos[0]['id']
-                    else:
-                        print("Robô: Criando projeto padrão 'Sincronização Automática'")
-                        try:
-                            new_proj = {
-                                "nome": f"Sincronização Automática {mes}",
-                                "codigo": "AUTO" + mes.replace("/", ""),
-                                "status": "Ativo"
-                            }
-                            proj_res = supabase.table("projetos").insert(new_proj).execute()
-                            if proj_res.data:
-                                projeto_id = proj_res.data[0]['id']
-                                projetos.append(proj_res.data[0])
-                        except Exception as e:
-                            print(f"Erro ao criar projeto automático: {e}")
-
-                if not tomador_id or not projeto_id:
-                    print(f"Aviso: Não foi possível vincular a nota {numero_nota} a um cliente/projeto. Pulando.")
-                    continue
-
-                nota_db = {
-                    "numero": numero_nota,
-                    "data_emissao": data_emi[:10] if data_emi else None,
-                    "tomador_id": tomador_id,
-                    "projeto_id": projeto_id,
-                    "valor": valor_bruto,
-                    "iss": (valor_iss / valor_bruto * 100) if valor_bruto > 0 and valor_iss > 0 else 5.0,
-                    "tipo": "Prestada",
-                    "status": "Emitida"
-                }
-                
                 try:
-                    supabase.table("notas").insert(nota_db).execute()
-                    importados_sucesso += 1
-                    print(f"Nota {numero_nota} vinculada ao cliente {tomador_id} e salva!")
-                except Exception as db_err:
-                    if "409" in str(db_err) or "duplicate" in str(db_err).lower():
-                        pass # Já existe
-                    else:
-                        print(f"Erro ao salvar nota {numero_nota}: {db_err}")
-                
-            except Exception as parse_err:
-                print(f"Erro no parseamento da nota: {parse_err}")
+                    root = ET.fromstring(xml_content)
+                    dps_node = root.find(".//{*}infDPS")
+                    data_emi = get_xml_text(dps_node, ["dhEmi"]) or get_xml_text(dps_node, ["dCompet"])
+                    
+                    # Filtra apenas o mês de interesse para o banco de dados
+                    # Se data_emi é "2026-02-27T..."
+                    if data_emi and f"{ref_ano}-{ref_mes}" in data_emi:
+                        total_notas_detectadas += 1
+                        print(f"Nota {nsu} detectada para o período {mes}. Processando...")
+                        
+                        # Processamento da nota (igual v4.1...)
+                        val_node = root.find(".//{*}valores")
+                        toma_node = root.find(".//{*}toma")
+                        serv_node = root.find(".//{*}serv")
+                        
+                        numero_nota = get_xml_text(root, ["nNFSe"])
+                        valor_bruto = float(get_xml_text(val_node, ["vLiq"]) or 0)
+                        valor_iss = float(get_xml_text(val_node, ["vISSQN"]) or 0)
+                        
+                        nome_tomador_xml = get_xml_text(toma_node, ["xNome"])
+                        cnpj_tomador_xml = get_xml_text(toma_node, ["CNPJ"]) or get_xml_text(toma_node, ["CPF"])
+                        desc_servico = get_xml_text(serv_node, ["xDescServ"]) or ""
 
-        print(f"Sincronização Finalizada. Total salvo: {importados_sucesso} notas.")
+                        # 1. Busca/Cadastro Cliente
+                        tomador_id = None
+                        clean_cnpj_xml = ''.join(filter(str.isdigit, cnpj_tomador_xml)) if cnpj_tomador_xml else None
+                        for c in clientes:
+                            if clean_cnpj_xml and clean_cnpj_xml == ''.join(filter(str.isdigit, str(c.get('documento', '')) or '')):
+                                tomador_id = c['id']
+                                break
+                        
+                        if not tomador_id and nome_tomador_xml:
+                            try:
+                                res_new = supabase.table("clientes").insert({"nome_razao": nome_tomador_xml, "documento": cnpj_tomador_xml, "status": "Ativo"}).execute()
+                                if res_new.data:
+                                    tomador_id = res_new.data[0]['id']
+                                    clientes.append(res_new.data[0])
+                            except: pass
+
+                        # 2. Busca/Cadastro Projeto
+                        projeto_id = None
+                        if projetos: projeto_id = projetos[0]['id'] # Default
+
+                        if tomador_id and projeto_id:
+                            nota_db = {
+                                "numero": numero_nota,
+                                "data_emissao": data_emi[:10],
+                                "tomador_id": tomador_id,
+                                "projeto_id": projeto_id,
+                                "valor": valor_bruto,
+                                "iss": (valor_iss / valor_bruto * 100) if valor_bruto > 0 else 5.0,
+                                "tipo": "Prestada",
+                                "status": "Emitida"
+                            }
+                            try:
+                                supabase.table("notas").upsert(nota_db, on_conflict="numero,tomador_id").execute()
+                                importados_sucesso += 1
+                                # Envia PDF/XML ao OneDrive apenas se filter passar
+                                folder_path = f"Sincronizacao-{mes.replace('/', '-')}"
+                                onedrive.upload_file(xml_content.encode('utf-8'), f"{numero_nota}_{chave}.xml", subfolder=folder_path)
+                                pdf = service.download_pdf(chave)
+                                if pdf: onedrive.upload_file(pdf, f"{numero_nota}_{chave}.pdf", subfolder=folder_path)
+                            except: pass
+
+                except Exception as e:
+                    print(f"Erro no parse da nota {nsu}: {e}")
+
+            if len(docs) < 50: # Fim dos registros
+                break
+
+        print(f"Fim do Ciclo. Atendidas: {total_notas_detectadas}, Importadas: {importados_sucesso}")
 
     except Exception as fatal_err:
         print(f"ERRO CRÍTICO: {fatal_err}")
