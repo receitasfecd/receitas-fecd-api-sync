@@ -173,14 +173,23 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 
                 if not tomador_id:
                     if not nome_tomador:
-                        log_msg(f"Nota {numero_nota}: Impasse! O XML não contem a tag de Nome do Tomador para o CNPJ/CPF {cnpj_tomador}")
+                        log_msg(f"Aviso Nota {numero_nota}: O XML não contem a tag de Nome do Tomador. Usando Fallback.")
                         nome_tomador = "Cliente/Fornecedor Não Identificado" # Fallback de emergência
 
                     try:
-                        c_res = supabase.table("clientes").insert({"nome_razao": nome_tomador, "documento": cnpj_tomador, "status": "Ativo"}).execute()
-                        if c_res.data:
-                            tomador_id = c_res.data[0]['id']
-                            clientes.append(c_res.data[0])
+                        # Dupla checagem direto no banco para evitar conflitos/vazio
+                        exc_cli = supabase.table("clientes").select("*").eq("documento", cnpj_tomador).execute()
+                        if exc_cli.data:
+                            tomador_id = exc_cli.data[0]['id']
+                            clientes.append(exc_cli.data[0])
+                        else:
+                            c_res = supabase.table("clientes").insert({"nome_razao": nome_tomador, "documento": cnpj_tomador, "status": "Ativo"}).execute()
+                            if c_res.data:
+                                tomador_id = c_res.data[0]['id']
+                                clientes.append(c_res.data[0])
+                            else:
+                                log_msg(f"Nota {numero_nota}: Insert do Cliente falhou misteriosamente silencioso (Data Vazia). CNPJ: {cnpj_tomador}")
+                                # Se existir um cliente fallback na base, pode tentar pegar dele, mas por hora logamos.
                     except Exception as e:
                         log_msg(f"Nota {numero_nota}: Erro Crítico do BD Supabase ao criar Cliente {cnpj_tomador} - {str(e)}")
 
