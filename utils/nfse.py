@@ -105,6 +105,8 @@ class NFSeService:
                 return {"success": True, "data": data}
             elif response.status_code == 204:
                 return {"success": True, "data": None, "message": "Sem novos documentos."}
+            elif response.status_code == 404 and "NENHUM_DOCUMENTO_LOCALIZADO" in response.text:
+                return {"success": True, "data": None, "message": "Sem novos documentos (Fim da fila)."}
             else:
                 return {"success": False, "error": f"HTTP {response.status_code}", "details": response.text}
         except Exception as e:

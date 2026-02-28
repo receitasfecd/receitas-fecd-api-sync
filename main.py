@@ -96,13 +96,24 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 # Fallback NSU Loop (v5.0)
                 log_msg(f"Busca por data não retornou nada ou falhou ({res_date.get('error', 'Sem dados')}). Tentando Loop NSU...")
                 last_nsu = 0
-                while True:
+                max_iterations = 20 # Limite de segurança para não rodar infinito e crachar servidor
+                iterations = 0
+                while iterations < max_iterations:
+                    iterations += 1
                     res_nsu = service.fetch_dfe(last_nsu)
-                    if not res_nsu.get("success") or not res_nsu.get("data", {}).get("LoteDFe"): break
+                    if not res_nsu.get("success"):
+                        log_msg(f"Fim/Erro na busca NSU ({last_nsu}): {res_nsu.get('error')} - {res_nsu.get('message', '')}")
+                        break
+                    if not res_nsu.get("data") or not res_nsu.get("data").get("LoteDFe"):
+                        log_msg(f"Fim da fila NSU alcançado em {last_nsu}.")
+                        break
+                    
                     batch = res_nsu["data"]["LoteDFe"]
                     docs.extend(batch)
                     last_nsu = max([int(d.get("NSU", 0)) for d in batch])
-                    if len(batch) < 50: break
+                    log_msg(f"NSU Loop: lidos {len(batch)} documentos. Próximo NSU será > {last_nsu}")
+                    if len(batch) < 50: 
+                        break
         
         elif doc_type == "nfe":
             # Busca NF-e (Produtos) via SOAP (Gemini Advice)
