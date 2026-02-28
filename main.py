@@ -12,6 +12,25 @@ from utils.onedrive import onedrive
 # Carrega variáveis de ambiente
 load_dotenv()
 
+from typing import Dict, Any
+import time
+
+SYNC_STATE: Dict[str, Any] = {
+    "status": "idle",
+    "total_imported": 0,
+    "logs": [],
+    "start_time": 0,
+    "cnpj": "",
+    "progress": 0
+}
+
+def log_msg(msg: str):
+    timestamp = time.strftime('%H:%M:%S')
+    SYNC_STATE["logs"].append(f"{timestamp} - {msg}")
+    if len(SYNC_STATE["logs"]) > 50:
+        SYNC_STATE["logs"].pop(0)
+    print(f"[SYNC] {msg}")
+
 app = FastAPI(title="FECD Sync API", version="2.0.0")
 
 app.add_middleware(
@@ -43,7 +62,9 @@ def get_xml_text(elem, tags):
     return None
 
 def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "nfse", dt_inicio: str = None, dt_fim: str = None):
-    print(f"Iniciando sincronização v6.0 ({doc_type}) para {mes}...")
+    log_msg(f"Iniciando sincronização v6.0 ({doc_type}) para {mes}...")
+    SYNC_STATE["status"] = "running"
+    SYNC_STATE["progress"] = 5
     try:
         service = NFSeService(pfx_data, pfx_password)
         
@@ -66,14 +87,14 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 dt_inicio = f"{aaaa}-{mm}-01"
                 dt_fim = f"{aaaa}-{mm}-{last_day:02d}"
 
-            print(f"Buscando NFS-e por DATA: {dt_inicio} até {dt_fim}")
+            log_msg(f"Buscando NFS-e por DATA: {dt_inicio} até {dt_fim}")
             res_date = service.search_by_date(dt_inicio, dt_fim)
             if res_date.get("success") and res_date.get("data", {}).get("LoteDFe"):
                 docs = res_date["data"]["LoteDFe"]
-                print(f"Encontradas {len(docs)} notas via busca por data.")
+                log_msg(f"Encontradas {len(docs)} notas via busca por data.")
             else:
                 # Fallback NSU Loop (v5.0)
-                print("Busca por data não retornou nada ou falhou. Tentando Loop NSU...")
+                log_msg(f"Busca por data não retornou nada ou falhou ({res_date.get('error', 'Sem dados')}). Tentando Loop NSU...")
                 last_nsu = 0
                 while True:
                     res_nsu = service.fetch_dfe(last_nsu)
@@ -85,10 +106,16 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
         
         elif doc_type == "nfe":
             # Busca NF-e (Produtos) via SOAP (Gemini Advice)
-            print("Buscando NF-e (Produtos) via SOAP...")
+            log_msg("Buscando NF-e (Produtos) via SOAP...")
             res_nfe = service.fetch_nfe(0)
             if res_nfe.get("success"):
                 docs = res_nfe["data"]["LoteDFe"]
+                log_msg(f"Encontrados {len(docs)} documentos via SOAP.")
+            else:
+                log_msg(f"Erro na busca SEFAZ: {res_nfe.get('error')}")
+
+        SYNC_STATE["progress"] = 30
+
 
         # 2. Processar documentos encontrados
         for doc in docs:
@@ -98,22 +125,26 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
             try:
                 root = ET.fromstring(xml_content)
                 # Extração básica
-                val_node = root.find(".//{*}valores") or root.find(".//{*}vLiq")
-                toma_node = root.find(".//{*}toma") or root.find(".//{*}dest")
-                serv_node = root.find(".//{*}serv") or root.find(".//{*}det")
-                dps_node = root.find(".//{*}infDPS") or root.find(".//{*}infNFe")
+                val_node = root.find(".//{*}valores") or root.find(".//{*}vLiq") or root.find(".//{*}Valores")
+                toma_node = root.find(".//{*}toma") or root.find(".//{*}dest") or root.find(".//{*}tomador") or root.find(".//{*}Tomador")
+                serv_node = root.find(".//{*}serv") or root.find(".//{*}det") or root.find(".//{*}Servico") or root.find(".//{*}servico")
+                dps_node = root.find(".//{*}infDPS") or root.find(".//{*}infNFe") or root.find(".//{*}InfDeclaracaoPrestacaoServico") or root
                 
-                numero_nota = get_xml_text(root, ["nNFSe", "nNF"])
-                data_emi = get_xml_text(dps_node, ["dhEmi", "dEmi", "dCompet"])
+                numero_nota = get_xml_text(root, ["nNFSe", "nNF", "Numero", "numero"])
+                data_emi = get_xml_text(dps_node, ["dhEmi", "dEmi", "dCompet", "DataEmissao", "Competencia"])
                 
                 # Filtro de mês (apenas se for nfse e não foi filtrado pela API)
                 if doc_type == "nfse" and mes.split("/")[1] not in (data_emi or ""):
+                     log_msg(f"Ignorando nota {numero_nota}: Fora do ano configurado ({data_emi})")
                      continue
 
                 valor_bruto = float(get_xml_text(val_node, ["vLiq", "vNF"]) or 0)
                 
-                nome_tomador = get_xml_text(toma_node, ["xNome"])
-                cnpj_tomador = get_xml_text(toma_node, ["CNPJ", "CPF"])
+                nome_tomador = get_xml_text(toma_node, ["xNome", "RazaoSocial"])
+                cnpj_tomador = get_xml_text(toma_node, ["CNPJ", "CPF", "Cnpj", "Cpf"])
+                
+                if not nome_tomador:
+                    log_msg(f"Aviso: Não encontrou nome do tomador para a nota {numero_nota}")
                 
                 # Vínculo cliente
                 tomador_id = None
@@ -147,19 +178,29 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                     try:
                         supabase.table("notas").upsert(nota_db, on_conflict="numero,tomador_id").execute()
                         importados_sucesso += 1
+                        log_msg(f"Nota {numero_nota} ({nome_tomador}) importada/atualizada com sucesso no BD.")
                         # OneDrive
                         folder = f"Sincronizacao-{mes.replace('/', '-')}"
                         onedrive.upload_file(xml_content.encode('utf-8'), f"{numero_nota}.xml", subfolder=folder)
                         if doc_type == "nfse":
                             pdf = service.download_pdf(doc.get("ChaveAcesso"))
                             if pdf: onedrive.upload_file(pdf, f"{numero_nota}.pdf", subfolder=folder)
-                    except: pass
+                    except Exception as db_err: 
+                        log_msg(f"Erro ao inserir nota {numero_nota} no banco: {db_err}")
             except Exception as e:
-                print(f"Erro ao processar doc: {e}")
+                log_msg(f"Erro ao processar doc: {e}")
 
-        print(f"Sincronização Finalizada. {importados_sucesso} notas importadas.")
+        SYNC_STATE["progress"] = 100
+        SYNC_STATE["status"] = "done"
+        SYNC_STATE["total_imported"] = importados_sucesso
+        log_msg(f"Sincronização Finalizada. {importados_sucesso} notas importadas e sincronizadas.")
     except Exception as e:
-        print(f"ERRO CRÍTICO NO ROBÔ: {e}")
+        SYNC_STATE["status"] = "error"
+        log_msg(f"ERRO CRÍTICO NO ROBÔ: {e}")
+
+@app.get("/status")
+async def get_sync_status():
+    return SYNC_STATE
 
 @app.post("/sincronizar")
 async def disparar_sincronizacao(
@@ -187,6 +228,13 @@ async def disparar_sincronizacao(
 
     background_tasks.add_task(process_sync, mes_referencia, pf_data, senha_pfx, doc_type, data_inicio, data_fim)
     
+    SYNC_STATE["status"] = "running"
+    SYNC_STATE["progress"] = 0
+    SYNC_STATE["total_imported"] = 0
+    SYNC_STATE["logs"] = []
+    SYNC_STATE["cnpj"] = cnpj_detectado
+    log_msg(f"Sincronização agendada para o CNPJ {cnpj_detectado}")
+
     return {
         "status": "sucesso",
         "cnpj": cnpj_detectado,
