@@ -229,15 +229,21 @@ async def disparar_sincronizacao(
         raise HTTPException(status_code=403, detail="Token de segurança inválido.")
     
     pf_data = await certificado.read()
+    
+    # Extrai CNPJ para feedback imediato
+    cnpj_detectado = "Não identificado"
     try:
         test_service = NFSeService(pf_data, senha_pfx)
-        if not test_service.cnpj:
+        cnpj_detectado = test_service.cnpj
+        if not cnpj_detectado:
              raise Exception("PFX não identificado.")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Certificado Inválido: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Erro ao ler certificado: {str(e)}")
 
     background_tasks.add_task(process_sync, mes_referencia, pf_data, senha_pfx)
     
     return {
-        "status": "sucesso", 
-        "mensagem": f"Robô v3.0 iniciado! O processo levará alguns instantes. Confira a aba Notas Emitidas em breve."    }
+        "status": "sucesso",
+        "cnpj": cnpj_detectado,
+        "mensagem": f"Robô v4.1 iniciado para o CNPJ {cnpj_detectado}! Buscando notas de {mes_referencia}. Verifique a aba de Notas em instantes."
+    }
