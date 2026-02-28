@@ -126,3 +126,84 @@ class NFSeService:
         except:
             pass
         return None
+
+    def search_by_date(self, start_date, end_date, doc_type="2"):
+        """
+        Busca notas por período.
+        doc_type "1" = emitidas, "2" = recebidas
+        """
+        url = f"{self.base_url}/DFe"
+        payload = {
+            "dataInicial": start_date, # YYYY-MM-DD
+            "dataFinal": end_date,
+            "tipoDocumento": doc_type,
+            "pagina": 1,
+            "itensPorPagina": 100
+        }
+        headers = {
+            "User-Agent": "GestaoNFSeApp/1.0",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+
+        try:
+            with self._create_pem_context() as cert_path:
+                response = requests.post(url, cert=cert_path, json=payload, headers=headers, timeout=30, verify=False)
+            
+            if response.status_code in [200, 201]:
+                data = response.json()
+                processed = []
+                for doc in data.get("LoteDFe", []):
+                    xml_b64 = doc.get("ArquivoXml")
+                    if xml_b64:
+                        try:
+                            xml_bytes = base64.b64decode(xml_b64)
+                            try:
+                                doc["xml_decoded"] = gzip.decompress(xml_bytes).decode('utf-8')
+                            except:
+                                doc["xml_decoded"] = xml_bytes.decode('utf-8')
+                        except: pass
+                    processed.append(doc)
+                data["LoteDFe"] = processed
+                return {"success": True, "data": data}
+            return {"success": False, "error": f"HTTP {response.status_code}", "details": response.text}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    def fetch_nfe(self, nsu=0):
+        """
+        Busca NF-e (Produtos) via SOAP SEFAZ Nacional.
+        """
+        url = "https://www1.nfe.fazenda.gov.br/NFeDistribuicaoDFe/NFeDistribuicaoDFe.asmx"
+        soap_body = f"""<?xml version="1.0" encoding="utf-8"?>
+        <soap:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap="http://www.w3.org/2003/05/soap-envelope">
+          <soap:Body>
+            <distDFeInt xmlns="http://www.portalfiscal.inf.br/nfe">
+              <tpAmb>1</tpAmb><cUFAutor>91</cUFAutor><CNPJ>{self.cnpj}</CNPJ>
+              <distNSU><ultNSU>{nsu:015d}</ultNSU></distNSU>
+            </distDFeInt>
+          </soap:Body>
+        </soap:Envelope>"""
+        
+        headers = {
+            "Content-Type": "application/soap+xml; charset=utf-8",
+            "SOAPAction": "http://www.portalfiscal.inf.br/nfe/wsdl/NFeDistribuicaoDFe/distDFeInt"
+        }
+
+        try:
+            with self._create_pem_context() as cert_path:
+                response = requests.post(url, cert=cert_path, data=soap_body, headers=headers, timeout=30, verify=False)
+            if response.status_code == 200:
+                import re
+                doc_zips = re.findall(r'<docZip[^>]*>(.*?)</docZip>', response.text)
+                results = []
+                for dz in doc_zips:
+                    try:
+                        xml_bytes = base64.b64decode(dz)
+                        xml_str = gzip.decompress(xml_bytes).decode('utf-8', errors='ignore')
+                        results.append({"xml_decoded": xml_str, "NSU": "SOAP"})
+                    except: pass
+                return {"success": True, "data": {"LoteDFe": results}}
+            return {"success": False, "error": f"HTTP {response.status_code}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
