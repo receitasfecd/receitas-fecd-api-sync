@@ -183,7 +183,7 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                             tomador_id = exc_cli.data[0]['id']
                             clientes.append(exc_cli.data[0])
                         else:
-                            c_res = supabase.table("clientes").insert({"nome_razao": nome_tomador, "documento": cnpj_tomador, "status": "Ativo"}).execute()
+                            c_res = supabase.table("clientes").insert({"nome_razao": nome_tomador, "documento": cnpj_tomador}).execute()
                             if c_res.data:
                                 tomador_id = c_res.data[0]['id']
                                 clientes.append(c_res.data[0])
