@@ -144,10 +144,16 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 numero_nota = get_xml_text(root, ["nNFSe", "nNF", "Numero", "numero"])
                 data_emi = get_xml_text(dps_node, ["dhEmi", "dEmi", "dCompet", "DataEmissao", "Competencia"])
                 
-                # Filtro de mês (apenas se for nfse e não foi filtrado pela API)
-                if doc_type == "nfse" and mes.split("/")[1] not in (data_emi or ""):
-                     log_msg(f"Ignorando nota {numero_nota}: Fora do ano configurado ({data_emi})")
-                     continue
+                # Filtro de mês avançado (apenas se for nfse e não foi filtrado pela API)
+                if doc_type == "nfse":
+                    if data_inicio and data_fim and data_emi:
+                        emi_date = data_emi[:10]
+                        if not (data_inicio <= emi_date <= data_fim):
+                            log_msg(f"Ignorando nota {numero_nota}: Fora do periodo configurado ({emi_date})")
+                            continue
+                    elif mes.split("/")[1] not in (data_emi or ""):
+                        log_msg(f"Ignorando nota {numero_nota}: Fora do ano configurado ({data_emi})")
+                        continue
 
                 valor_bruto = float(get_xml_text(val_node, ["vLiq", "vNF"]) or 0)
                 
@@ -198,6 +204,11 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                             if pdf: onedrive.upload_file(pdf, f"{numero_nota}.pdf", subfolder=folder)
                     except Exception as db_err: 
                         log_msg(f"Erro ao inserir nota {numero_nota} no banco: {db_err}")
+                else:
+                    if not projeto_id:
+                        log_msg(f"Nota {numero_nota} abortada: Seu sistema não possui um Projeto padrão cadastrado na nuvem.")
+                    if not tomador_id:
+                        log_msg(f"Nota {numero_nota} abortada: Falha ao criar/vincular cliente com CNPJ {cnpj_tomador}")
             except Exception as e:
                 log_msg(f"Erro ao processar doc: {e}")
 
