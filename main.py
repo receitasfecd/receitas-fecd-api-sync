@@ -137,7 +137,7 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 root = ET.fromstring(xml_content)
                 # Extração básica
                 val_node = root.find(".//{*}valores") or root.find(".//{*}vLiq") or root.find(".//{*}Valores")
-                toma_node = root.find(".//{*}toma") or root.find(".//{*}dest") or root.find(".//{*}tomador") or root.find(".//{*}Tomador")
+                toma_node = root.find(".//{*}toma") or root.find(".//{*}dest") or root.find(".//{*}tomador") or root.find(".//{*}Tomador") or root.find(".//{*}TomadorServico")
                 serv_node = root.find(".//{*}serv") or root.find(".//{*}det") or root.find(".//{*}Servico") or root.find(".//{*}servico")
                 dps_node = root.find(".//{*}infDPS") or root.find(".//{*}infNFe") or root.find(".//{*}InfDeclaracaoPrestacaoServico") or root
                 
@@ -171,13 +171,18 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                         tomador_id = c['id']
                         break
                 
-                if not tomador_id and nome_tomador:
+                if not tomador_id:
+                    if not nome_tomador:
+                        log_msg(f"Nota {numero_nota}: Impasse! O XML não contem a tag de Nome do Tomador para o CNPJ/CPF {cnpj_tomador}")
+                        nome_tomador = "Cliente/Fornecedor Não Identificado" # Fallback de emergência
+
                     try:
                         c_res = supabase.table("clientes").insert({"nome_razao": nome_tomador, "documento": cnpj_tomador, "status": "Ativo"}).execute()
                         if c_res.data:
                             tomador_id = c_res.data[0]['id']
                             clientes.append(c_res.data[0])
-                    except: pass
+                    except Exception as e:
+                        log_msg(f"Nota {numero_nota}: Erro Crítico do BD Supabase ao criar Cliente {cnpj_tomador} - {str(e)}")
 
                 projeto_id = projetos[0]['id'] if projetos else None
                 
