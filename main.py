@@ -146,9 +146,9 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 
                 # Filtro de mês avançado (apenas se for nfse e não foi filtrado pela API)
                 if doc_type == "nfse":
-                    if data_inicio and data_fim and data_emi:
+                    if dt_inicio and dt_fim and data_emi:
                         emi_date = data_emi[:10]
-                        if not (data_inicio <= emi_date <= data_fim):
+                        if not (dt_inicio <= emi_date <= dt_fim):
                             log_msg(f"Ignorando nota {numero_nota}: Fora do periodo configurado ({emi_date})")
                             continue
                     elif mes.split("/")[1] not in (data_emi or ""):
