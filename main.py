@@ -138,6 +138,7 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 # Extração básica
                 val_node = root.find(".//{*}valores") or root.find(".//{*}vLiq") or root.find(".//{*}Valores")
                 toma_node = root.find(".//{*}toma") or root.find(".//{*}dest") or root.find(".//{*}tomador") or root.find(".//{*}Tomador") or root.find(".//{*}TomadorServico")
+                prest_node = root.find(".//{*}prestador") or root.find(".//{*}Prestador") or root.find(".//{*}PrestadorServico") or root.find(".//{*}emit")
                 serv_node = root.find(".//{*}serv") or root.find(".//{*}det") or root.find(".//{*}Servico") or root.find(".//{*}servico")
                 dps_node = root.find(".//{*}infDPS") or root.find(".//{*}infNFe") or root.find(".//{*}InfDeclaracaoPrestacaoServico") or root
                 
@@ -160,36 +161,54 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 nome_tomador = get_xml_text(toma_node, ["xNome", "RazaoSocial"])
                 cnpj_tomador = get_xml_text(toma_node, ["CNPJ", "CPF", "Cnpj", "Cpf"])
                 
-                if not nome_tomador:
-                    log_msg(f"Aviso: Não encontrou nome do tomador para a nota {numero_nota}")
+                clean_cnpj_toma = ''.join(filter(str.isdigit, cnpj_tomador)) if cnpj_tomador else ""
+                meu_cnpj = service.cnpj or ""
                 
-                # Vínculo cliente
+                nota_tipo = "Prestada" if doc_type == "nfse" else "Tomada"
+                nome_outra_parte = nome_tomador
+                cnpj_outra_parte = cnpj_tomador
+                
+                # Se o CNPJ do tomador for o da FECD, então a FECD é a TOMADORA (Despesa)
+                if clean_cnpj_toma and meu_cnpj and clean_cnpj_toma == meu_cnpj:
+                    nota_tipo = "Tomada"
+                    if prest_node is not None:
+                        nome_outra_parte = get_xml_text(prest_node, ["xNome", "RazaoSocial"])
+                        cnpj_outra_parte = get_xml_text(prest_node, ["CNPJ", "CPF", "Cnpj", "Cpf"])
+                    else:
+                        nome_outra_parte = "Fornecedor Não Identificado"
+                        cnpj_outra_parte = ""
+                
+                if not nome_outra_parte:
+                    log_msg(f"Aviso: Não encontrou nome da outra parte para a nota {numero_nota}")
+                
+                # Vínculo cliente/fornecedor
                 tomador_id = None
-                clean_cnpj = ''.join(filter(str.isdigit, cnpj_tomador)) if cnpj_tomador else ""
+                clean_cnpj_outra = ''.join(filter(str.isdigit, cnpj_outra_parte)) if cnpj_outra_parte else ""
                 for c in clientes:
-                    if clean_cnpj and clean_cnpj == ''.join(filter(str.isdigit, str(c.get('documento', '')))):
+                    if clean_cnpj_outra and clean_cnpj_outra == ''.join(filter(str.isdigit, str(c.get('documento', '')))):
                         tomador_id = c['id']
                         break
                 
                 if not tomador_id:
-                    if not nome_tomador:
-                        log_msg(f"Aviso Nota {numero_nota}: O XML não contem a tag de Nome do Tomador. Usando Fallback.")
-                        nome_tomador = "Cliente/Fornecedor Não Identificado" # Fallback de emergência
+                    if not nome_outra_parte:
+                        log_msg(f"Aviso Nota {numero_nota}: O XML não contem a tag de Nome. Usando Fallback.")
+                        nome_outra_parte = "Cliente/Fornecedor Não Identificado" # Fallback de emergência
 
                     try:
                         # Dupla checagem direto no banco para evitar conflitos/vazio
-                        exc_cli = supabase.table("clientes").select("*").eq("documento", cnpj_tomador).execute()
+                        exc_cli = supabase.table("clientes").select("*").eq("documento", cnpj_outra_parte).execute()
                         if exc_cli.data:
                             tomador_id = exc_cli.data[0]['id']
                             clientes.append(exc_cli.data[0])
                         else:
-                            c_res = supabase.table("clientes").insert({"nome_razao": nome_tomador, "documento": cnpj_tomador, "tipo": "cliente"}).execute()
+                            tipo_cadastro = "fornecedor" if nota_tipo == "Tomada" else "cliente"
+                            c_res = supabase.table("clientes").insert({"nome_razao": nome_outra_parte, "documento": cnpj_outra_parte, "tipo": tipo_cadastro}).execute()
                             if c_res.data:
                                 tomador_id = c_res.data[0]['id']
                                 clientes.append(c_res.data[0])
                             else:
-                                log_msg(f"Nota {numero_nota}: Insert do Cliente falhou misteriosamente silencioso (Data Vazia). CNPJ: {cnpj_tomador}")
-                                # Se existir um cliente fallback na base, pode tentar pegar dele, mas por hora logamos.
+                                log_msg(f"Nota {numero_nota}: Insert do Cliente falhou silenciosamente. CNPJ: {cnpj_outra_parte}")
+
                     except Exception as e:
                         log_msg(f"Nota {numero_nota}: Erro Crítico do BD Supabase ao criar Cliente {cnpj_tomador} - {str(e)}")
 
@@ -203,13 +222,13 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                         "projeto_id": projeto_id,
                         "valor": valor_bruto,
                         "iss": 5.0,
-                        "tipo": "Prestada" if doc_type == "nfse" else "Tomada",
+                        "tipo": nota_tipo,
                         "status": "Emitida"
                     }
                     try:
                         supabase.table("notas").upsert(nota_db, on_conflict="numero,tomador_id").execute()
                         importados_sucesso += 1
-                        log_msg(f"Nota {numero_nota} ({nome_tomador}) importada/atualizada com sucesso no BD.")
+                        log_msg(f"Nota {numero_nota} ({nome_outra_parte}) importada/atualizada com sucesso no BD.")
                         # OneDrive
                         folder = f"Sincronizacao-{mes.replace('/', '-')}"
                         onedrive.upload_file(xml_content.encode('utf-8'), f"{numero_nota}.xml", subfolder=folder)
@@ -222,7 +241,7 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                     if not projeto_id:
                         log_msg(f"Nota {numero_nota} abortada: Seu sistema não possui um Projeto padrão cadastrado na nuvem.")
                     if not tomador_id:
-                        log_msg(f"Nota {numero_nota} abortada: Falha ao criar/vincular cliente com CNPJ {cnpj_tomador}")
+                        log_msg(f"Nota {numero_nota} abortada: Falha ao criar/vincular cliente com CNPJ {cnpj_outra_parte}")
             except Exception as e:
                 log_msg(f"Erro ao processar doc: {e}")
 
