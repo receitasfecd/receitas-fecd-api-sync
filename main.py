@@ -276,3 +276,21 @@ async def disparar_sincronizacao(
         "cnpj": cnpj_detectado,
         "mensagem": f"Robô v6.0 iniciado para o CNPJ {cnpj_detectado}! Buscando {doc_type} de {mes_referencia}."
     }
+
+@app.get("/notas/{numero}/link")
+async def obter_link_nota(numero: str, mes: str = ""):
+    # mes formato esperado: "02-2026"
+    subfolder = f"Sincronizacao-{mes}" if mes else ""
+    filename = f"{numero}.pdf"
+    
+    url = onedrive.get_file_link(filename, subfolder)
+    
+    if not url and subfolder:
+        # Fallback para buscar direto na raiz caso alguém tenha movido
+        url = onedrive.get_file_link(filename, "")
+        
+    if url:
+        return {"url": url}
+        
+    raise HTTPException(status_code=404, detail="Nota não encontrada no OneDrive")
+

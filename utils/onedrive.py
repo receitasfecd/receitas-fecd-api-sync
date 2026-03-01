@@ -79,4 +79,19 @@ class OneDriveClient:
                 return False
         return True
 
+    def get_file_link(self, filename, subfolder=""):
+        token = self._get_token()
+        if not token: return None
+        remote_path = f"{self.remote_root}/{subfolder}/{filename}" if subfolder else f"{self.remote_root}/{filename}"
+        safe_path = quote(remote_path)
+        url = f"https://graph.microsoft.com/v1.0/users/{self.user_id}/drive/root:/{safe_path}"
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            resp = requests.get(url, headers=headers)
+            if resp.status_code == 200:
+                return resp.json().get("webUrl")
+        except:
+            pass
+        return None
+
 onedrive = OneDriveClient()
