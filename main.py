@@ -212,7 +212,12 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                     except Exception as e:
                         log_msg(f"Nota {numero_nota}: Erro Crítico do BD Supabase ao criar Cliente {cnpj_tomador} - {str(e)}")
 
-                projeto_id = projetos[0]['id'] if projetos else None
+                current_client = next((c for c in clientes if c['id'] == tomador_id), None)
+                projeto_id = None
+                if current_client and current_client.get('projeto_padrao_id'):
+                    projeto_id = current_client['projeto_padrao_id']
+                if not projeto_id:
+                    projeto_id = projetos[0]['id'] if projetos else None
                 
                 if tomador_id and projeto_id:
                     nota_db = {
