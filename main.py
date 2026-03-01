@@ -307,9 +307,32 @@ async def obter_link_nota(numero: str, mes: str = ""):
     if not url and subfolder:
         # Fallback para buscar direto na raiz caso alguém tenha movido
         url = onedrive.get_file_link(filename, "")
+    
+    # Second fallback, try XML if PDF doesn't exist
+    if not url:
+        filename_xml = f"{numero}.xml"
+        url = onedrive.get_file_link(filename_xml, subfolder)
+        if not url and subfolder:
+            url = onedrive.get_file_link(filename_xml, "")
         
     if url:
         return {"url": url}
         
     raise HTTPException(status_code=404, detail="Nota não encontrada no OneDrive")
+
+@app.get("/debug/onedrive")
+async def debug_onedrive(folder: str = ""):
+    from urllib.parse import quote
+    import requests
+    token = onedrive._get_token()
+    if not token: return {"error": "no token"}
+    
+    remote_path = f"{onedrive.remote_root}/{folder}" if folder else onedrive.remote_root
+    safe_path = quote(remote_path)
+    url = f"https://graph.microsoft.com/v1.0/users/{onedrive.user_id}/drive/root:/{safe_path}:/children"
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = requests.get(url, headers=headers)
+    if resp.status_code == 200:
+        return {"files": [f["name"] for f in resp.json().get("value", [])]}
+    return {"error": resp.status_code, "msg": resp.text}
 
