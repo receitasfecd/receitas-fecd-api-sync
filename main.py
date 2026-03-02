@@ -165,6 +165,17 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 meu_cnpj = service.cnpj or ""
                 
                 nota_tipo = "Prestada" if doc_type == "nfse" else "Tomada"
+                
+                # Detecção de Cancelamento (Situacao: 2=Cancelada em alguns formatos, ou tag sit)
+                # No Portal ADN v1.2, a tag situacao costuma vir no root ou no serviço
+                # Se for NF-e (Produtos), o resumo sitConf costuma indicar
+                sit = get_xml_text(root, ["situacao", "sit", "cSitConf", "situacaoDFe"])
+                is_cancelada = False
+                if sit in ["2", "CANCELADA", "3", "Cancelada"]:
+                    is_cancelada = True
+                
+                # Fallback: se o nome do tomador/prestador contiver "CANCELADA" ou algo similar (raro mas acontece no texto)
+                
                 nome_outra_parte = nome_tomador
                 cnpj_outra_parte = cnpj_tomador
                 
@@ -225,10 +236,10 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                         "data_emissao": data_emi[:10] if data_emi else None,
                         "tomador_id": tomador_id,
                         "projeto_id": projeto_id,
-                        "valor": valor_bruto,
+                        "valor": 0.0 if is_cancelada else valor_bruto, # Zera o valor para sair dos somatórios
                         "iss": 5.0,
                         "tipo": nota_tipo,
-                        "status": "Emitida"
+                        "status": "Cancelada" if is_cancelada else "Emitida"
                     }
                     try:
                         supabase.table("notas").upsert(nota_db, on_conflict="numero,tomador_id").execute()
