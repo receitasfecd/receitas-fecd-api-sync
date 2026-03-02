@@ -166,20 +166,21 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 
                 nota_tipo = "Prestada" if doc_type == "nfse" else "Tomada"
                 
-                # Detecção de Cancelamento / Substituição
+                # Detecção de Cancelamento / Substituição - Abordagem Agressiva
                 # 1. Verifica no metadata da API (ADN v1.2 retorna Situacao no JSON)
                 meta_sit = str(doc.get("Situacao", ""))
                 
-                # 2. Verifica no XML (vários padrões)
-                xml_sit = get_xml_text(root, ["cSitNFSe", "situacao", "sit", "cSitConf", "situacaoDFe"])
+                # 2. Verifica no XML (vários padrões de tags e também busca no texto bruto do XML)
+                xml_sit = get_xml_text(root, ["cSitNFSe", "situacao", "sit", "cSitConf", "situacaoDFe", "Status", "cSit", "codSit"])
                 
                 is_cancelada = False
                 # Situacao 2 = Cancelada, Situacao 3 = Substituída (NFS-e Nacional)
-                if meta_sit in ["2", "3"] or xml_sit in ["2", "3", "CANCELADA", "Cancelada"]:
+                # Também checa se o texto "CANCELADA" aparece em qualquer lugar do XML bruto
+                if meta_sit in ["2", "3"] or xml_sit in ["2", "3", "CANCELADA", "Cancelada", "4"] or ("CANCELADA" in xml_content.upper()):
                     is_cancelada = True
-                    log_msg(f"Nota {numero_nota}: Detectado status CANCELADA/SUBSTITUÍDA via Metadados/XML (Meta: {meta_sit}, XML: {xml_sit})")
+                    log_msg(f"Nota {numero_nota}: Detectado status CANCELADA via Metadados/XML (Meta: {meta_sit}, XML_Tag: {xml_sit})")
                 
-                # 3. Download do PDF e verificação de texto (A pedido do usuário para garantia)
+                # 3. Download do PDF e verificação de texto (Trata marcas d'água com espaços como C A N C E L A D A)
                 pdf_content = None
                 if doc_type == "nfse":
                     chave = doc.get("ChaveAcesso")
@@ -187,18 +188,21 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                         pdf_content = service.download_pdf(chave)
                         if pdf_content and not is_cancelada:
                             try:
-                                import io
+                                import io, re
                                 from pypdf import PdfReader
                                 reader = PdfReader(io.BytesIO(pdf_content))
                                 pdf_text = ""
                                 for page in reader.pages:
                                     pdf_text += (page.extract_text() or "")
                                 
-                                if "CANCELADA" in pdf_text.upper() or "SUBSTITUIDA" in pdf_text.upper() or "SUBSTITUÍDA" in pdf_text.upper():
+                                # Limpa todos os espaços para pegar marcas d'água do tipo "C A N C E L A D A"
+                                pdf_text_clean = re.sub(r'\s+', '', pdf_text.upper())
+                                
+                                if "CANCELADA" in pdf_text_clean or "SUBSTITUIDA" in pdf_text_clean or "CANCELADA" in pdf_text.upper():
                                     is_cancelada = True
-                                    log_msg(f"Nota {numero_nota}: Status CANCELADA detectado no CONTEÚDO DO PDF.")
+                                    log_msg(f"Nota {numero_nota}: Status CANCELADA detectado no TEXTO do PDF (Limpo: {pdf_text_clean[:20]}...)")
                             except Exception as pdf_err:
-                                log_msg(f"Aviso Nota {numero_nota}: Falha ao ler texto do PDF para checar cancelamento: {pdf_err}")
+                                log_msg(f"Aviso Nota {numero_nota}: Falha ao analisar conteúdo do PDF: {pdf_err}")
                 
                 nome_outra_parte = nome_tomador
                 cnpj_outra_parte = cnpj_tomador
