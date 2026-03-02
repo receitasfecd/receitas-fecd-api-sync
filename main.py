@@ -87,8 +87,8 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 dt_inicio = f"{aaaa}-{mm}-01"
                 dt_fim = f"{aaaa}-{mm}-{last_day:02d}"
 
-            log_msg(f"Buscando NFS-e por DATA: {dt_inicio} até {dt_fim}")
-            res_date = service.search_by_date(dt_inicio, dt_fim)
+            log_msg(f"Buscando NFS-e EMITIDAS (Receitas) por DATA: {dt_inicio} até {dt_fim}")
+            res_date = service.search_by_date(dt_inicio, dt_fim, doc_type="1")
             if res_date.get("success") and res_date.get("data", {}).get("LoteDFe"):
                 docs = res_date["data"]["LoteDFe"]
                 log_msg(f"Encontradas {len(docs)} notas via busca por data.")
@@ -195,12 +195,14 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                                 for page in reader.pages:
                                     pdf_text += (page.extract_text() or "")
                                 
-                                # Limpa todos os espaços para pegar marcas d'água do tipo "C A N C E L A D A"
-                                pdf_text_clean = re.sub(r'\s+', '', pdf_text.upper())
+                                # Limpa TUDO: remove espaços, hífens, pontos, etc. para pegar "C-A-N-C-E-L-A-D-A" ou "C A N C E L"
+                                pdf_text_clean = re.sub(r'[^A-Z]', '', pdf_text.upper())
+                                
+                                log_msg(f"Nota {numero_nota}: PDF lido. Primeiros 30 caracteres limpos: {pdf_text_clean[:30]}")
                                 
                                 if "CANCELADA" in pdf_text_clean or "SUBSTITUIDA" in pdf_text_clean or "CANCELADA" in pdf_text.upper():
                                     is_cancelada = True
-                                    log_msg(f"Nota {numero_nota}: Status CANCELADA detectado no TEXTO do PDF (Limpo: {pdf_text_clean[:20]}...)")
+                                    log_msg(f"Nota {numero_nota}: !!! Status CANCELADA detectado no TEXTO do PDF !!!")
                             except Exception as pdf_err:
                                 log_msg(f"Aviso Nota {numero_nota}: Falha ao analisar conteúdo do PDF: {pdf_err}")
                 
