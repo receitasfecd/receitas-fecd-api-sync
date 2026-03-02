@@ -177,7 +177,28 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 # Situacao 2 = Cancelada, Situacao 3 = Substituída (NFS-e Nacional)
                 if meta_sit in ["2", "3"] or xml_sit in ["2", "3", "CANCELADA", "Cancelada"]:
                     is_cancelada = True
-                    log_msg(f"Nota {numero_nota}: Detectado status CANCELADA/SUBSTITUÍDA (Meta: {meta_sit}, XML: {xml_sit})")
+                    log_msg(f"Nota {numero_nota}: Detectado status CANCELADA/SUBSTITUÍDA via Metadados/XML (Meta: {meta_sit}, XML: {xml_sit})")
+                
+                # 3. Download do PDF e verificação de texto (A pedido do usuário para garantia)
+                pdf_content = None
+                if doc_type == "nfse":
+                    chave = doc.get("ChaveAcesso")
+                    if chave:
+                        pdf_content = service.download_pdf(chave)
+                        if pdf_content and not is_cancelada:
+                            try:
+                                import io
+                                from pypdf import PdfReader
+                                reader = PdfReader(io.BytesIO(pdf_content))
+                                pdf_text = ""
+                                for page in reader.pages:
+                                    pdf_text += (page.extract_text() or "")
+                                
+                                if "CANCELADA" in pdf_text.upper() or "SUBSTITUIDA" in pdf_text.upper() or "SUBSTITUÍDA" in pdf_text.upper():
+                                    is_cancelada = True
+                                    log_msg(f"Nota {numero_nota}: Status CANCELADA detectado no CONTEÚDO DO PDF.")
+                            except Exception as pdf_err:
+                                log_msg(f"Aviso Nota {numero_nota}: Falha ao ler texto do PDF para checar cancelamento: {pdf_err}")
                 
                 nome_outra_parte = nome_tomador
                 cnpj_outra_parte = cnpj_tomador
@@ -248,9 +269,14 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                         # OneDrive
                         folder = f"Sincronizacao-{mes.replace('/', '-')}"
                         onedrive.upload_file(xml_content.encode('utf-8'), f"{numero_nota}.xml", subfolder=folder)
-                        if doc_type == "nfse":
-                            pdf = service.download_pdf(doc.get("ChaveAcesso"))
-                            if pdf: onedrive.upload_file(pdf, f"{numero_nota}.pdf", subfolder=folder)
+                        
+                        # Upload do PDF (Se já baixou para o teste de cancelamento ou se baixar agora)
+                        if not pdf_content and doc_type == "nfse":
+                             pdf_content = service.download_pdf(doc.get("ChaveAcesso"))
+                        
+                        if pdf_content:
+                            onedrive.upload_file(pdf_content, f"{numero_nota}.pdf", subfolder=folder)
+                            
                     except Exception as db_err: 
                         log_msg(f"Erro ao inserir nota {numero_nota} no banco: {db_err}")
                 else:
