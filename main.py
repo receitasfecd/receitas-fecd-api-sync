@@ -166,15 +166,18 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 
                 nota_tipo = "Prestada" if doc_type == "nfse" else "Tomada"
                 
-                # Detecção de Cancelamento (Situacao: 2=Cancelada em alguns formatos, ou tag sit)
-                # No Portal ADN v1.2, a tag situacao costuma vir no root ou no serviço
-                # Se for NF-e (Produtos), o resumo sitConf costuma indicar
-                sit = get_xml_text(root, ["situacao", "sit", "cSitConf", "situacaoDFe"])
-                is_cancelada = False
-                if sit in ["2", "CANCELADA", "3", "Cancelada"]:
-                    is_cancelada = True
+                # Detecção de Cancelamento / Substituição
+                # 1. Verifica no metadata da API (ADN v1.2 retorna Situacao no JSON)
+                meta_sit = str(doc.get("Situacao", ""))
                 
-                # Fallback: se o nome do tomador/prestador contiver "CANCELADA" ou algo similar (raro mas acontece no texto)
+                # 2. Verifica no XML (vários padrões)
+                xml_sit = get_xml_text(root, ["cSitNFSe", "situacao", "sit", "cSitConf", "situacaoDFe"])
+                
+                is_cancelada = False
+                # Situacao 2 = Cancelada, Situacao 3 = Substituída (NFS-e Nacional)
+                if meta_sit in ["2", "3"] or xml_sit in ["2", "3", "CANCELADA", "Cancelada"]:
+                    is_cancelada = True
+                    log_msg(f"Nota {numero_nota}: Detectado status CANCELADA/SUBSTITUÍDA (Meta: {meta_sit}, XML: {xml_sit})")
                 
                 nome_outra_parte = nome_tomador
                 cnpj_outra_parte = cnpj_tomador
