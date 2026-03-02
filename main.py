@@ -184,16 +184,13 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 
                 # Se o CNPJ do tomador for o da FECD, então a FECD é a TOMADORA (Despesa)
                 if clean_cnpj_toma and meu_cnpj and clean_cnpj_toma == meu_cnpj:
-                    nota_tipo = "Tomada"
-                    if prest_node is not None:
-                        nome_outra_parte = get_xml_text(prest_node, ["xNome", "RazaoSocial"])
-                        cnpj_outra_parte = get_xml_text(prest_node, ["CNPJ", "CPF", "Cnpj", "Cpf"])
-                    else:
-                        nome_outra_parte = "Fornecedor Não Identificado"
-                        cnpj_outra_parte = ""
+                    log_msg(f"Ignorando nota {numero_nota}: É uma nota TOMADA (Despesa/Entrada).")
+                    continue
                 
-                if not nome_outra_parte:
-                    log_msg(f"Aviso: Não encontrou nome da outra parte para a nota {numero_nota}")
+                # Se passamos pelo filtro acima, é uma nota Prestada (Receita)
+                nota_tipo = "Prestada"
+                nome_outra_parte = nome_tomador
+                cnpj_outra_parte = cnpj_tomador
                 
                 # Vínculo cliente/fornecedor
                 tomador_id = None
