@@ -376,21 +376,49 @@ async def renomear_notas(req: RenameRequest):
 async def obter_link_nota(numero: str, mes: str = ""):
     # mes formato esperado: "02-2026"
     subfolder = f"Sincronizacao-{mes}" if mes else ""
-    filename = f"{numero}.pdf"
     
-    url = onedrive.get_file_link(filename, subfolder)
+    # 1. Tenta buscar pelo nome PADRÃO (Numero.pdf/xml)
+    filename_pdf = f"{numero}.pdf"
+    url = onedrive.get_file_link(filename_pdf, subfolder)
     
-    if not url and subfolder:
-        # Fallback para buscar direto na raiz caso alguém tenha movido
-        url = onedrive.get_file_link(filename, "")
-    
-    # Second fallback, try XML if PDF doesn't exist
     if not url:
         filename_xml = f"{numero}.xml"
         url = onedrive.get_file_link(filename_xml, subfolder)
-        if not url and subfolder:
-            url = onedrive.get_file_link(filename_xml, "")
+
+    # 2. Se não achou, tenta buscar pelo nome RENOMEADO
+    if not url:
+        # Busca detalhes da nota no Supabase para montar o nome
+        not_res = supabase.table("notas")\
+            .select("*, tomador:clientes(nome_razao), projeto:projetos(nome)")\
+            .eq("numero", numero)\
+            .execute()
         
+        if not_res.data:
+            n = not_res.data[0]
+            dt_raw = n.get("data_emissao") # yyyy-mm-dd
+            dt_str = "01-01-2026"
+            if dt_raw:
+                y, m, d = dt_raw.split("-")
+                dt_str = f"{d}-{m}-{y}"
+            
+            cliente = n.get("tomador", {}).get("nome_razao", "CLIENTE") if n.get("tomador") else "CLIENTE"
+            projeto = n.get("projeto", {}).get("nome", "PROJETO") if n.get("projeto") else "PROJETO"
+            valor = n.get("valor", 0)
+            valor_fmt = "{:,.2f}".format(valor).replace(",", "X").replace(".", ",").replace("X", ".")
+            
+            new_filename_base = f"{numero} [{dt_str}] {cliente} - {projeto} - {valor_fmt}"
+            
+            # Tenta PDF renomeado
+            url = onedrive.get_file_link(f"{new_filename_base}.pdf", subfolder)
+            if not url:
+                # Tenta XML renomeado
+                url = onedrive.get_file_link(f"{new_filename_base}.xml", subfolder)
+
+    # Fallback raizes (Legacy)
+    if not url and subfolder:
+        url = onedrive.get_file_link(f"{numero}.pdf", "")
+        if not url: url = onedrive.get_file_link(f"{numero}.xml", "")
+
     if url:
         return {"url": url}
         
