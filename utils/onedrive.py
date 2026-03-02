@@ -94,4 +94,23 @@ class OneDriveClient:
             pass
         return None
 
+    def rename_file(self, old_filename, new_filename, subfolder=""):
+        token = self._get_token()
+        if not token: return False
+        
+        old_path = f"{self.remote_root}/{subfolder}/{old_filename}" if subfolder else f"{self.remote_root}/{old_filename}"
+        safe_path = quote(old_path)
+        
+        url = f"https://graph.microsoft.com/v1.0/users/{self.user_id}/drive/root:/{safe_path}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
+        }
+        
+        try:
+            resp = requests.patch(url, headers=headers, json={"name": new_filename}, timeout=60)
+            return resp.status_code in [200, 204] # 204 No Content is also possible for some PATCH operations but usually 200
+        except:
+            return False
+
 onedrive = OneDriveClient()

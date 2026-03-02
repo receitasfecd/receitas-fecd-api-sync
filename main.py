@@ -12,7 +12,7 @@ from utils.onedrive import onedrive
 # Carrega variáveis de ambiente
 load_dotenv()
 
-from typing import Dict, Any
+from typing import Dict, Any, List
 import time
 
 SYNC_STATE: Dict[str, Any] = {
@@ -299,6 +299,77 @@ async def disparar_sincronizacao(
         "status": "sucesso",
         "cnpj": cnpj_detectado,
         "mensagem": f"Robô v6.0 iniciado para o CNPJ {cnpj_detectado}! Buscando {doc_type} de {mes_referencia}."
+    }
+
+class RenameRequest(BaseModel):
+    ids: List[str]
+
+@app.post("/notas/rename")
+async def renomear_notas(req: RenameRequest):
+    if not req.ids:
+        return {"status": "vazio"}
+    
+    # Busca notas com tomadores e projetos
+    notas_res = supabase.table("notas")\
+        .select("*, tomador:clientes(nome_razao), projeto:projetos(nome)")\
+        .in_("id", req.ids)\
+        .execute()
+    
+    if not notas_res.data:
+        raise HTTPException(status_code=404, detail="Nenhuma nota encontrada")
+    
+    renamed_count = 0
+    errors = []
+    
+    for n in notas_res.data:
+        try:
+            # Formato: 45 [04-02-2026] CRISTALIA - PROJETO - 16.071,89
+            num = n.get("numero")
+            dt_raw = n.get("data_emissao") # yyyy-mm-dd
+            dt_str = "01-01-2026"
+            subfolder = ""
+            if dt_raw:
+                y, m, d = dt_raw.split("-")
+                dt_str = f"{d}-{m}-{y}"
+                subfolder = f"Sincronizacao-{m}-{y}"
+            
+            cliente = n.get("tomador", {}).get("nome_razao", "CLIENTE") if n.get("tomador") else "CLIENTE"
+            projeto = n.get("projeto", {}).get("nome", "PROJETO") if n.get("projeto") else "PROJETO"
+            valor = n.get("valor", 0)
+            valor_fmt = "{:,.2f}".format(valor).replace(",", "X").replace(".", ",").replace("X", ".")
+            
+            new_filename_base = f"{num} [{dt_str}] {cliente} - {projeto} - {valor_fmt}"
+            
+            # Tentativas para PDF e XML
+            exts = [".pdf", ".xml"]
+            found_something = False
+            for ext in exts:
+                old_name = f"{num}{ext}"
+                new_name = f"{new_filename_base}{ext}"
+                
+                # Tenta renomear na pasta original
+                ok = onedrive.rename_file(old_name, new_name, subfolder)
+                if not ok:
+                    # Se falhar, tenta na raiz (fallback)
+                    ok = onedrive.rename_file(old_name, new_name, "")
+                
+                if ok: 
+                    found_something = True
+
+            if found_something:
+                renamed_count += 1
+            else:
+                # Se não renomeou nada, talvez já esteja renomeado ou arquivo não existe
+                pass
+                
+        except Exception as e:
+            errors.append(f"Erro na nota {n.get('numero')}: {str(e)}")
+            
+    return {
+        "status": "concluido",
+        "total": len(req.ids),
+        "renomeados": renamed_count,
+        "erros": errors
     }
 
 @app.get("/notas/{numero}/link")
