@@ -61,6 +61,42 @@ def get_xml_text(elem, tags):
         if res is not None and res.text: return res.text
     return None
 
+def is_nota_cancelada_no_pdf(pdf_bytes, numero_nota):
+    """
+    Analise profunda do PDF para detectar marcas d'água de cancelamento.
+    """
+    if not pdf_bytes: return False
+    try:
+        import io, re
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        full_text = ""
+        for page in reader.pages:
+            full_text += (page.extract_text() or "")
+        
+        # 1. Limpeza total (Apenas LETRAS de A-Z)
+        clean_text = re.sub(r'[^A-Z]', '', full_text.upper())
+        
+        # 2. Palavras-Chave Padrão e Espelhadas (comum em marcas d'água diagonais)
+        # ADALECNAC = CANCELADA invertido
+        keywords = ["CANCELADA", "SUBSTITUIDA", "INVALIDADA", "CANCELADO", "ESTORNADA", "ESTORNADO", "ADALECNAC", "ODALECNAC"]
+        
+        log_msg(f"Debug Nota {numero_nota}: PDF Text Sample (60 chars): {clean_text[:60]}")
+        
+        for kw in keywords:
+            if kw in clean_text:
+                log_msg(f"Nota {numero_nota}: Cancelamento detectado no PDF pelo termo: {kw}")
+                return True
+        
+        # 3. Busca no texto bruto (com espaços)
+        raw_upper = full_text.upper()
+        if "CANCELADA" in raw_upper or "SUBSTITUIDA" in raw_upper:
+            return True
+            
+    except Exception as e:
+        log_msg(f"Erro ao ler PDF da nota {numero_nota}: {e}")
+    return False
+
 def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "nfse", dt_inicio: str = None, dt_fim: str = None):
     log_msg(f"Iniciando sincronização v6.0 ({doc_type}) para {mes}...")
     SYNC_STATE["status"] = "running"
@@ -193,72 +229,44 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 
                 nota_tipo = "Prestada" if doc_type == "nfse" else "Tomada"
                 
-                # Detecção de Cancelamento / Substituição - Abordagem Ultra-Agressiva
-                # 1. Verifica no metadata da API (ADN v1.2 retorna Situacao no JSON)
-                meta_sit = str(doc.get("Situacao", ""))
-                
-                # 2. Verifica no XML (vários padrões de tags e também busca no texto bruto do XML)
-                xml_sit = get_xml_text(root, ["cSitNFSe", "situacao", "sit", "cSitConf", "situacaoDFe", "Status", "cSit", "codSit", "cStat", "tipoEvento", "xMotivo", "Motivo", "xJust"])
-                
-                # Procura por campos de substituição ou cancelamento explícito
-                subst_node = root.find(".//{*}nNFSeSubst") or root.find(".//{*}infSubst") or root.find(".//{*}idSubst") or root.find(".//{*}infCanc")
-                has_subst_tag = subst_node is not None
-                
+                # Detecção de Cancelamento / Substituição - ABORDAGEM TOTAL
                 is_cancelada = False
                 
-                # Prioridade 1: O número da nota está na nossa lista de eventos de cancelamento?
-                if numero_nota in notas_canceladas_por_evento:
+                # 0. Verificação Global no XML Bruto (Se a palavra existe em qualquer lugar do arquivo)
+                xml_raw_upper = xml_content.upper()
+                if any(kw in xml_raw_upper for kw in ["CANCELADA", "CANCELADO", "CANCELAMENTO", "SUBSTITUIDA", "SUBSTITUÍDA", "110111"]):
                     is_cancelada = True
-                    log_msg(f"Nota {numero_nota}: Status CANCELADA via Evento 110111 vinculado.")
+                    log_msg(f"Nota {numero_nota}: Cancelamento detectado via Busca Global no XML.")
 
-                # Prioridade 2: Códigos técnicos e Tags
+                # 1. Verifica se houve Evento 110111 vinculado
+                if not is_cancelada and numero_nota in notas_canceladas_por_evento:
+                    is_cancelada = True
+                    log_msg(f"Nota {numero_nota}: Status CANCELADA via Evento 110111 pré-identificado.")
+
+                # 2. Códigos técnicos e Tags específicas
                 if not is_cancelada:
-                    # Lista expandida de códigos técnicos (Incluindo 110111, 201, 202 e outros de cancelamento/substituição)
-                    cancel_codes = ["2", "3", "4", "9", "99", "101", "102", "110111", "201", "202", "135", "136", "155", "CANCELADA", "Cancelada", "Substituida", "Substituída"]
+                    meta_sit = str(doc.get("Situacao", ""))
+                    xml_sit = get_xml_text(root, ["cSitNFSe", "situacao", "sit", "cSitConf", "situacaoDFe", "Status", "cSit", "codSit", "cStat", "tipoEvento", "xMotivo", "Motivo", "xJust"])
+                    subst_node = root.find(".//{*}nNFSeSubst") or root.find(".//{*}infSubst") or root.find(".//{*}idSubst") or root.find(".//{*}infCanc")
                     
-                    if meta_sit in cancel_codes or xml_sit in cancel_codes or has_subst_tag:
+                    cancel_codes = ["2", "3", "4", "9", "99", "101", "102", "110111", "201", "202", "135", "136", "155"]
+                    
+                    if meta_sit in cancel_codes or xml_sit in cancel_codes or subst_node is not None:
                         is_cancelada = True
-                        log_msg(f"Nota {numero_nota}: Status CANCELADA/SUBST detectado via Código/Tag (Meta: {meta_sit}, XML_Tag: {xml_sit}, Subst: {has_subst_tag})")
-                
-                if not is_cancelada:
-                    xml_upper = xml_content.upper()
-                    if any(kw in xml_upper for kw in ["CANCELAMENTO", "CANCELADO", "CANCELADA", "SUBSTITUICAO", "SUBSTITUIDA", "SUBSTITUÍDA", "INVALIDADA"]):
-                        is_cancelada = True
-                        log_msg(f"Nota {numero_nota}: Status CANCELADA/SUBST detectado via TEXTO NO XML.")
+                        log_msg(f"Nota {numero_nota}: Cancelamento detectado via Códigos técnicos (Meta: {meta_sit}, Tag: {xml_sit})")
 
-                # 3. Download do PDF e verificação de texto
+                # 3. VERIFICAÇÃO FINAL NO PDF (Caso o XML falhe)
                 pdf_content = None
                 if doc_type == "nfse":
                     chave = doc.get("ChaveAcesso")
                     if chave:
                         pdf_content = service.download_pdf(chave)
-                        if pdf_content and not is_cancelada:
-                            try:
-                                import io, re
-                                from pypdf import PdfReader
-                                reader = PdfReader(io.BytesIO(pdf_content))
-                                pdf_text = ""
-                                for page in reader.pages:
-                                    pdf_text += (page.extract_text() or "")
-                                
-                                # Limpa TUDO: remove qualquer coisa que não seja letra
-                                pdf_text_clean = re.sub(r'[^A-Z]', '', pdf_text.upper())
-                                
-                                # Termos de busca, incluindo "ADALECNAC" (CANCELADA invertido)
-                                keywords = ["CANCELADA", "SUBSTITUIDA", "INVALIDADA", "CANCELADO", "ESTORNADA", "ESTORNADO", "ADALECNAC"]
-                                found_kw = next((kw for kw in keywords if kw in pdf_text_clean or kw in pdf_text.upper()), None)
-                                
-                                if found_kw:
-                                    is_cancelada = True
-                                    log_msg(f"Nota {numero_nota}: !!! Status CANCELADA detectado via PDF (Termo: {found_kw}) !!!")
-                                else:
-                                    # Log informativo para debug se necessário
-                                    log_msg(f"Nota {numero_nota}: PDF lido (Amostra 60 caracteres: {pdf_text_clean[:60]}), não detectou cancelamento.")
-                            except Exception as pdf_err:
-                                log_msg(f"Aviso Nota {numero_nota}: Erro na análise do PDF: {pdf_err}")
-                
+                        # Se o PDF diz que está cancelada, então está cancelada.
+                        if is_nota_cancelada_no_pdf(pdf_content, numero_nota):
+                            is_cancelada = True
+
                 if not is_cancelada:
-                    log_msg(f"Nota {numero_nota}: Processada como ATIVA (Meta: {meta_sit}, Tag: {xml_sit})")
+                    log_msg(f"Nota {numero_nota}: NENHUM sinal de cancelamento encontrado. Processando como ATIVA.")
                 
                 nome_outra_parte = nome_tomador
                 cnpj_outra_parte = cnpj_tomador
