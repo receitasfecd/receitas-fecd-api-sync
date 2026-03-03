@@ -88,13 +88,25 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 dt_fim = f"{aaaa}-{mm}-{last_day:02d}"
 
             log_msg(f"Buscando NFS-e EMITIDAS (Receitas) por DATA: {dt_inicio} até {dt_fim}")
-            res_date = service.search_by_date(dt_inicio, dt_fim, doc_type="1")
-            if res_date.get("success") and res_date.get("data", {}).get("LoteDFe"):
-                docs = res_date["data"]["LoteDFe"]
-                log_msg(f"Encontradas {len(docs)} notas via busca por data.")
+            current_page = 1
+            while True:
+                res_date = service.search_by_date(dt_inicio, dt_fim, doc_type="1", pagina=current_page)
+                if res_date.get("success") and res_date.get("data", {}).get("LoteDFe"):
+                    page_docs = res_date["data"]["LoteDFe"]
+                    docs.extend(page_docs)
+                    log_msg(f"Pagina {current_page}: Encontradas {len(page_docs)} notas.")
+                    if len(page_docs) < 100: # Fim das páginas
+                        break
+                    current_page += 1
+                    if current_page > 5: break # Limite de segurança de 500 notas
+                else:
+                    if current_page == 1:
+                        log_msg(f"Busca por data não retornou nada ou falhou ({res_date.get('error', 'Sem dados')}). Tentando Loop NSU...")
+                    break
+            
+            if docs:
+                log_msg(f"Total de {len(docs)} notas encontradas via busca por data.")
             else:
-                # Fallback NSU Loop (v5.0)
-                log_msg(f"Busca por data não retornou nada ou falhou ({res_date.get('error', 'Sem dados')}). Tentando Loop NSU...")
                 last_nsu = 0
                 max_iterations = 20 # Limite de segurança para não rodar infinito e crachar servidor
                 iterations = 0
@@ -210,6 +222,7 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                                 # Limpa TUDO: remove qualquer coisa que não seja letra
                                 pdf_text_clean = re.sub(r'[^A-Z]', '', pdf_text.upper())
                                 
+                                # Termos de busca, incluindo "ADALECNAC" (CANCELADA invertido)
                                 keywords = ["CANCELADA", "SUBSTITUIDA", "INVALIDADA", "CANCELADO", "ESTORNADA", "ESTORNADO", "ADALECNAC"]
                                 found_kw = next((kw for kw in keywords if kw in pdf_text_clean or kw in pdf_text.upper()), None)
                                 
@@ -217,7 +230,8 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                                     is_cancelada = True
                                     log_msg(f"Nota {numero_nota}: !!! Status CANCELADA detectado via PDF (Termo: {found_kw}) !!!")
                                 else:
-                                    log_msg(f"Nota {numero_nota}: PDF lido (Amostra: {pdf_text_clean[:100]}), não detectou cancelamento.")
+                                    # Log informativo para debug se necessário
+                                    log_msg(f"Nota {numero_nota}: PDF lido (Amostra 60 caracteres: {pdf_text_clean[:60]}), não detectou cancelamento.")
                             except Exception as pdf_err:
                                 log_msg(f"Aviso Nota {numero_nota}: Erro na análise do PDF: {pdf_err}")
                 

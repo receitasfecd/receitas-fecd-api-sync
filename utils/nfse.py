@@ -129,9 +129,9 @@ class NFSeService:
             pass
         return None
 
-    def search_by_date(self, start_date, end_date, doc_type="2"):
+    def search_by_date(self, start_date, end_date, doc_type="2", pagina=1):
         """
-        Busca notas por período.
+        Busca notas por período com suporte a paginação.
         doc_type "1" = emitidas, "2" = recebidas
         """
         url = f"{self.base_url}/DFe"
@@ -139,7 +139,7 @@ class NFSeService:
             "dataInicial": start_date, # YYYY-MM-DD
             "dataFinal": end_date,
             "tipoDocumento": doc_type,
-            "pagina": 1,
+            "pagina": pagina,
             "itensPorPagina": 100
         }
         headers = {
