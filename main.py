@@ -171,16 +171,16 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 meta_sit = str(doc.get("Situacao", ""))
                 
                 # 2. Verifica no XML (vários padrões de tags e também busca no texto bruto do XML)
-                xml_sit = get_xml_text(root, ["cSitNFSe", "situacao", "sit", "cSitConf", "situacaoDFe", "Status", "cSit", "codSit", "cStat", "tipoEvento", "xMotivo"])
+                xml_sit = get_xml_text(root, ["cSitNFSe", "situacao", "sit", "cSitConf", "situacaoDFe", "Status", "cSit", "codSit", "cStat", "tipoEvento", "xMotivo", "Motivo", "xJust"])
                 
-                # Procura por campos de substituição (se a nota foi substituída por outra)
-                subst_node = root.find(".//{*}nNFSeSubst") or root.find(".//{*}infSubst") or root.find(".//{*}idSubst")
+                # Procura por campos de substituição ou cancelamento explícito
+                subst_node = root.find(".//{*}nNFSeSubst") or root.find(".//{*}infSubst") or root.find(".//{*}idSubst") or root.find(".//{*}infCanc")
                 has_subst_tag = subst_node is not None
                 
                 is_cancelada = False
                 
-                # Lista expandida de códigos técnicos
-                cancel_codes = ["2", "3", "4", "9", "101", "102", "135", "136", "155", "CANCELADA", "Cancelada", "Substituida", "Substituída"]
+                # Lista expandida de códigos técnicos (Incluindo 101/102 da NFe e códigos de erro de prefeituras)
+                cancel_codes = ["2", "3", "4", "9", "99", "101", "102", "135", "136", "155", "CANCELADA", "Cancelada", "Substituida", "Substituída"]
                 
                 if meta_sit in cancel_codes or xml_sit in cancel_codes or has_subst_tag:
                     is_cancelada = True
@@ -210,11 +210,14 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                                 # Limpa TUDO: remove qualquer coisa que não seja letra
                                 pdf_text_clean = re.sub(r'[^A-Z]', '', pdf_text.upper())
                                 
-                                if any(kw in pdf_text_clean for kw in ["CANCELADA", "SUBSTITUIDA", "INVALIDADA", "CANCELADO"]):
+                                keywords = ["CANCELADA", "SUBSTITUIDA", "INVALIDADA", "CANCELADO", "ESTORNADA", "ESTORNADO", "ADALECNAC"]
+                                found_kw = next((kw for kw in keywords if kw in pdf_text_clean or kw in pdf_text.upper()), None)
+                                
+                                if found_kw:
                                     is_cancelada = True
-                                    log_msg(f"Nota {numero_nota}: !!! Status CANCELADA detectado via LEITURA DO PDF !!!")
+                                    log_msg(f"Nota {numero_nota}: !!! Status CANCELADA detectado via PDF (Termo: {found_kw}) !!!")
                                 else:
-                                    log_msg(f"Nota {numero_nota}: PDF lido (Início: {pdf_text_clean[:30]}), nada de cancelamento.")
+                                    log_msg(f"Nota {numero_nota}: PDF lido (Amostra: {pdf_text_clean[:100]}), não detectou cancelamento.")
                             except Exception as pdf_err:
                                 log_msg(f"Aviso Nota {numero_nota}: Erro na análise do PDF: {pdf_err}")
                 
