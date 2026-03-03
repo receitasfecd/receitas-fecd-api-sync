@@ -138,9 +138,24 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 log_msg(f"Erro na busca SEFAZ: {res_nfe.get('error')}")
 
         SYNC_STATE["progress"] = 30
+        log_msg(f"Processando {len(docs)} documentos brutos...")
 
+        # 2. Pré-processar Eventos de Cancelamento
+        # No padrão Nacional, o cancelamento é um Evento (tpEvento 110111) vinculado à nota.
+        notas_canceladas_por_evento = set()
+        for d in docs:
+            xc = d.get("xml_decoded")
+            if xc and "110111" in xc:
+                try:
+                    r = ET.fromstring(xc)
+                    # Tenta pegar o número da nota vinculada ao evento
+                    num_vinculo = get_xml_text(r, ["nNFSe", "numero", "nNF"])
+                    if num_vinculo:
+                        notas_canceladas_por_evento.add(num_vinculo)
+                        log_msg(f"Identificado Evento de Cancelamento (110111) para Nota {num_vinculo}")
+                except: pass
 
-        # 2. Processar documentos encontrados
+        # 3. Processar documentos encontrados
         for doc in docs:
             xml_content = doc.get("xml_decoded")
             if not xml_content: continue
@@ -191,12 +206,19 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 
                 is_cancelada = False
                 
-                # Lista expandida de códigos técnicos (Incluindo 101/102 da NFe e códigos de erro de prefeituras)
-                cancel_codes = ["2", "3", "4", "9", "99", "101", "102", "135", "136", "155", "CANCELADA", "Cancelada", "Substituida", "Substituída"]
-                
-                if meta_sit in cancel_codes or xml_sit in cancel_codes or has_subst_tag:
+                # Prioridade 1: O número da nota está na nossa lista de eventos de cancelamento?
+                if numero_nota in notas_canceladas_por_evento:
                     is_cancelada = True
-                    log_msg(f"Nota {numero_nota}: Status CANCELADA/SUBST detectado via Código/Tag (Meta: {meta_sit}, XML_Tag: {xml_sit}, Substituída: {has_subst_tag})")
+                    log_msg(f"Nota {numero_nota}: Status CANCELADA via Evento 110111 vinculado.")
+
+                # Prioridade 2: Códigos técnicos e Tags
+                if not is_cancelada:
+                    # Lista expandida de códigos técnicos (Incluindo 110111, 201, 202 e outros de cancelamento/substituição)
+                    cancel_codes = ["2", "3", "4", "9", "99", "101", "102", "110111", "201", "202", "135", "136", "155", "CANCELADA", "Cancelada", "Substituida", "Substituída"]
+                    
+                    if meta_sit in cancel_codes or xml_sit in cancel_codes or has_subst_tag:
+                        is_cancelada = True
+                        log_msg(f"Nota {numero_nota}: Status CANCELADA/SUBST detectado via Código/Tag (Meta: {meta_sit}, XML_Tag: {xml_sit}, Subst: {has_subst_tag})")
                 
                 if not is_cancelada:
                     xml_upper = xml_content.upper()
