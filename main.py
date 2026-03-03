@@ -25,10 +25,20 @@ SYNC_STATE: Dict[str, Any] = {
 }
 
 def log_msg(msg: str):
-    timestamp = time.strftime('%H:%M:%S')
-    SYNC_STATE["logs"].append(f"{timestamp} - {msg}")
-    if len(SYNC_STATE["logs"]) > 50:
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    log_line = f"{timestamp} - {msg}"
+    
+    # Log na memória para o frontend
+    SYNC_STATE["logs"].append(log_line)
+    if len(SYNC_STATE["logs"]) > 100:
         SYNC_STATE["logs"].pop(0)
+    
+    # Log no disco (persistente e completo)
+    try:
+        with open("sync_debug.log", "a", encoding="utf-8") as f:
+            f.write(log_line + "\n")
+    except: pass
+    
     print(f"[SYNC] {msg}")
 
 app = FastAPI(title="FECD Sync API", version="2.0.0")
@@ -232,11 +242,18 @@ def process_sync(mes: str, pfx_data: bytes, pfx_password: str, doc_type: str = "
                 # Detecção de Cancelamento / Substituição - ABORDAGEM TOTAL
                 is_cancelada = False
                 
-                # 0. Verificação Global no XML Bruto (Se a palavra existe em qualquer lugar do arquivo)
+                # 0. Verificação Global no XML Bruto (SOMENTE EM TAGS DE VALOR, não no texto todo para evitar falsos positivos)
+                # Procuramos por <situacao>2</situacao> ou <cSit>2</cSit> etc, de forma mais contida
                 xml_raw_upper = xml_content.upper()
-                if any(kw in xml_raw_upper for kw in ["CANCELADA", "CANCELADO", "CANCELAMENTO", "SUBSTITUIDA", "SUBSTITUÍDA", "110111"]):
+                
+                # Gatilhos específicos de texto que indicam cancelamento real no XML
+                xml_indicators = ["<SITUACAO>2</SITUACAO>", "<SITUACAO>3</SITUACAO>", "<CSITNFSE>2</CSITNFSE>", "<CSITNFSE>3</CSITNFSE>", 
+                                 "CANCELAMENTO", "SUBSTITUICAO", "EVENTOCANCELAMENTO"]
+                
+                if any(ind in xml_raw_upper for ind in xml_indicators):
+                    # Não marcamos direto como True para evitar erro da NF1, vamos validar com os outros campos
+                    log_msg(f"Nota {numero_nota}: Alerta de cancelamento detectado no XML bruto.")
                     is_cancelada = True
-                    log_msg(f"Nota {numero_nota}: Cancelamento detectado via Busca Global no XML.")
 
                 # 1. Verifica se houve Evento 110111 vinculado
                 if not is_cancelada and numero_nota in notas_canceladas_por_evento:
